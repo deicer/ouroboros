@@ -289,19 +289,30 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         cwd=str(REPO_DIR), capture_output=True,
     ).returncode
     if rc_verify != 0:
-        msg = f"Branch {branch} not found on remote"
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "reset_branch_missing",
-                "target_branch": branch, "reason": reason,
-            },
-        )
-        return False, msg
-
-    subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
+        # Branch doesn't exist on remote — create it from main (first-time setup)
+        rc_main = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/main"],
+            cwd=str(REPO_DIR), capture_output=True,
+        ).returncode
+        if rc_main != 0:
+            msg = f"Branch {branch} not found on remote and origin/main missing"
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "reset_branch_missing",
+                    "target_branch": branch, "reason": reason,
+                },
+            )
+            return False, msg
+        log.info("Branch %s not on remote — creating from origin/main", branch)
+        subprocess.run(["git", "checkout", "-b", branch, "origin/main"],
+                        cwd=str(REPO_DIR), check=True)
+        subprocess.run(["git", "push", "-u", "origin", branch],
+                        cwd=str(REPO_DIR), check=True)
+    else:
+        subprocess.run(["git", "checkout", branch], cwd=str(REPO_DIR), check=True)
+        subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
     # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
     for p in REPO_DIR.rglob("__pycache__"):
         shutil.rmtree(p, ignore_errors=True)
