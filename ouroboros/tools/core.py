@@ -341,12 +341,12 @@ def get_tools() -> List[ToolEntry]:
         }, _repo_list),
         ToolEntry("drive_read", {
             "name": "drive_read",
-            "description": "Read a UTF-8 text file from Google Drive (relative to MyDrive/Ouroboros/).",
+            "description": "Read a UTF-8 text file from the data volume (relative to /data/).",
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         }, _drive_read),
         ToolEntry("drive_list", {
             "name": "drive_list",
-            "description": "List files under a Drive directory.",
+            "description": "List files under a data volume directory.",
             "parameters": {"type": "object", "properties": {
                 "dir": {"type": "string", "default": "."},
                 "max_entries": {"type": "integer", "default": 500},
@@ -354,7 +354,7 @@ def get_tools() -> List[ToolEntry]:
         }, _drive_list),
         ToolEntry("drive_write", {
             "name": "drive_write",
-            "description": "Write a UTF-8 text file on Google Drive.",
+            "description": "Write a UTF-8 text file on the data volume.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
