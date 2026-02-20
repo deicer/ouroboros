@@ -1,0 +1,9 @@
+services:
+  ouroboros:
+    build: .
+    restart: on-failure
+    env_file: .env
+    volumes:
+      - ouroboros-data:/data
+volumes:
+  ouroboros-data:

@@ -29,8 +29,8 @@ from supervisor.telegram import send_with_budget
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
-REPO_DIR: pathlib.Path = pathlib.Path("/content/ouroboros_repo")
-DRIVE_ROOT: pathlib.Path = pathlib.Path("/content/drive/MyDrive/Ouroboros")
+REPO_DIR: pathlib.Path = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "/app"))
+DRIVE_ROOT: pathlib.Path = pathlib.Path(os.environ.get("DRIVE_ROOT", "/data"))
 MAX_WORKERS: int = 5
 SOFT_TIMEOUT_SEC: int = 600
 HARD_TIMEOUT_SEC: int = 1800
@@ -42,9 +42,9 @@ BRANCH_STABLE: str = "ouroboros-stable"
 
 _CTX = None
 _LAST_SPAWN_TIME: float = 0.0  # grace period: don't count dead workers right after spawn
-_SPAWN_GRACE_SEC: float = 90.0  # workers need up to ~60s to init on Colab (spawn + pip + Drive FUSE)
+_SPAWN_GRACE_SEC: float = 15.0  # workers need a few seconds to init
 
-# On Linux/Colab, "spawn" re-imports __main__ (colab_launcher.py) in child processes.
+# On Linux, "spawn" re-imports __main__ (launcher.py) in child processes.
 # Since launcher has top-level side effects, this causes worker child crashes (exitcode=1).
 # Use "fork" by default on Linux; allow override via env.
 _DEFAULT_WORKER_START_METHOD = "fork" if sys.platform.startswith("linux") else "spawn"
@@ -107,7 +107,6 @@ def get_event_q():
 WORKERS: Dict[int, Worker] = {}
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
-CRASH_TS: List[float] = []
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 
 # Lock for all mutations to PENDING, RUNNING, WORKERS shared collections.
@@ -547,42 +546,5 @@ def ensure_workers_healthy() -> None:
                     queue.enqueue_task(task, front=True)
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
-
-    now = time.time()
-    alive_now = sum(1 for w in WORKERS.values() if w.proc.is_alive())
-    if dead_detections:
-        # Count only meaningful failures:
-        # - any crash while a task was running, or
-        # - all workers dead at once.
-        if busy_crashes > 0 or alive_now == 0:
-            CRASH_TS.extend([now] * max(1, dead_detections))
-        else:
-            # Idle worker deaths with at least one healthy worker are degraded mode,
-            # not a crash storm condition.
-            CRASH_TS.clear()
-
-    CRASH_TS[:] = [t for t in CRASH_TS if (now - t) < 60.0]
-    if len(CRASH_TS) >= 3:
-        # Log crash storm but DON'T execv restart — that creates infinite loops.
-        # Instead: kill dead workers, notify owner, continue with direct-chat (threading).
-        st = load_state()
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "crash_storm_detected",
-                "crash_count": len(CRASH_TS),
-                "worker_count": len(WORKERS),
-            },
-        )
-        if st.get("owner_chat_id"):
-            send_with_budget(
-                int(st["owner_chat_id"]),
-                "⚠️ Frequent worker crashes. Multiprocessing workers disabled, "
-                "continuing in direct-chat mode (threading).",
-            )
-        # Kill all workers — direct chat via handle_chat_direct still works
-        kill_workers()
-        CRASH_TS.clear()
 
 
