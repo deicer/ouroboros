@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.0.0 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.0 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -75,7 +75,7 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 | `TOTAL_BUDGET` | Yes | Your spending limit in USD (e.g. `50`) |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) -- Fine-grained token with **Contents: Read and write** on your fork |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
-| `ANTHROPIC_API_KEY` | No | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Enables Claude Code CLI |
+| `ANTHROPIC_API_KEY` | Yes | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Claude Code CLI (sole code editing path) |
 
 ### Step 2: Fork the Repository
 
@@ -186,7 +186,6 @@ Full text: [BIBLE.md](BIBLE.md)
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | Enables the `web_search` tool |
-| `ANTHROPIC_API_KEY` | Enables Claude Code CLI for code editing |
 
 ### Optional Configuration (environment variables)
 
@@ -222,6 +221,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.0 -- Claude Code CLI as sole code editing path
+- **ANTHROPIC_API_KEY is now required** -- Claude Code CLI is the only way the agent edits its own code.
+- **Removed `repo_write_commit` tool** -- No more direct file writes to the repo. All edits go through `claude_code_edit` -> `repo_commit_push`.
 
 ### v7.0.0 -- Philosophy v4.0: User-Driven Self-Development
 - **BREAKING: New Bible (v4.0)** -- Complete philosophical shift from "autonomous becoming" to "helpful AI that develops itself while serving the user."

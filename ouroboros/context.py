@@ -734,7 +734,6 @@ def _compact_tool_call_arguments(tool_name: str, args_json: str) -> Dict[str, An
     """
     # Tools with large content fields that should be stripped
     LARGE_CONTENT_TOOLS = {
-        "repo_write_commit": "content",
         "drive_write": "content",
         "claude_code_edit": "prompt",
         "update_scratchpad": "content",

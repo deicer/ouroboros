@@ -53,7 +53,7 @@ TOTAL_BUDGET_LIMIT = float(os.environ["TOTAL_BUDGET"])
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", required=True)
 GITHUB_USER = get_cfg("GITHUB_USER")
 GITHUB_REPO = get_cfg("GITHUB_REPO")
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your .env file."
@@ -79,7 +79,7 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
 
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
 os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
-os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
+os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY)
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
 os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")

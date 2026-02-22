@@ -173,9 +173,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return "⚠️ ANTHROPIC_API_KEY not set, claude_code_edit unavailable."
+    api_key = os.environ["ANTHROPIC_API_KEY"]
 
     work_dir = str(ctx.repo_dir)
     if cwd and cwd.strip() not in ("", ".", "./"):
@@ -251,7 +249,7 @@ def get_tools() -> List[ToolEntry]:
         }, _run_shell, is_code_tool=True),
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
-            "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
+            "description": "Delegate code edits to Claude Code CLI. The sole way to edit code. Follow with repo_commit_push.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
