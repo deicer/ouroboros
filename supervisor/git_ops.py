@@ -55,8 +55,11 @@ def git_capture(cmd: List[str]) -> Tuple[int, str, str]:
 
 def ensure_repo_present() -> None:
     if not (REPO_DIR / ".git").exists():
-        subprocess.run(["rm", "-rf", str(REPO_DIR)], check=False)
-        subprocess.run(["git", "clone", REMOTE_URL, str(REPO_DIR)], check=True)
+        # Init git in-place (don't rm -rf /app — we're running from it!)
+        REPO_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=str(REPO_DIR), check=True)
+        subprocess.run(["git", "remote", "add", "origin", REMOTE_URL],
+                        cwd=str(REPO_DIR), check=True)
     else:
         subprocess.run(["git", "remote", "set-url", "origin", REMOTE_URL],
                         cwd=str(REPO_DIR), check=True)
