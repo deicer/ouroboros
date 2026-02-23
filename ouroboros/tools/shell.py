@@ -9,6 +9,7 @@ import pathlib
 import shlex
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -85,36 +86,37 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
 
 
 def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
-    """Run Claude CLI with permission-mode fallback."""
-    claude_bin = shutil.which("claude")
-    cmd = [
-        claude_bin, "-p", prompt,
-        "--output-format", "json",
-        "--max-turns", "12",
-        "--tools", "Read,Edit,Grep,Glob",
-    ]
+    """Run Claude CLI as ouroboros user with tempfile-based prompt."""
+    claude_bin = "/usr/local/bin/claude"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", prefix="claude_prompt_", delete=False
+        ) as f:
+            f.write(prompt)
+            tmp_path = f.name
+        os.chmod(tmp_path, 0o644)
 
-    # Try --permission-mode first, fallback to --dangerously-skip-permissions
-    perm_mode = os.environ.get("OUROBOROS_CLAUDE_CODE_PERMISSION_MODE", "bypassPermissions").strip()
-    primary_cmd = cmd + ["--permission-mode", perm_mode]
-    legacy_cmd = cmd + ["--dangerously-skip-permissions"]
+        inner_cmd = (
+            f"{claude_bin}"
+            f" -p \"$(cat {tmp_path})\""
+            f" --output-format json"
+            f" --max-turns 12"
+            f" --tools Read,Write,Edit,Grep,Glob"
+            f" --permission-mode bypassPermissions"
+        )
+        cmd = ["su", "-s", "/bin/bash", "-c", inner_cmd, "ouroboros"]
 
-    res = subprocess.run(
-        primary_cmd, cwd=work_dir,
-        capture_output=True, text=True, timeout=300, env=env,
-    )
-
-    if res.returncode != 0:
-        combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
-        if "--permission-mode" in combined and any(
-            m in combined for m in ("unknown option", "unknown argument", "unrecognized option", "unexpected argument")
-        ):
-            res = subprocess.run(
-                legacy_cmd, cwd=work_dir,
-                capture_output=True, text=True, timeout=300, env=env,
-            )
-
-    return res
+        return subprocess.run(
+            cmd, cwd=work_dir,
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
@@ -205,10 +207,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if candidate.exists():
             work_dir = str(candidate)
 
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        return "⚠️ Claude CLI not found. Ensure ANTHROPIC_API_KEY is set."
-
     ctx.emit_progress_fn("Delegating to Claude Code CLI...")
 
     lock = _acquire_git_lock(ctx)
@@ -226,12 +224,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
         env = os.environ.copy()
         env["ANTHROPIC_API_KEY"] = api_key
-        try:
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
-                env.setdefault("IS_SANDBOX", "1")
-        except Exception:
-            log.debug("Failed to check geteuid for sandbox detection", exc_info=True)
-            pass
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
@@ -245,7 +237,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if not stdout:
             stdout = "OK: Claude Code completed with empty output."
 
-        # Check for uncommitted changes and append warning BEFORE finally block
         warning = _check_uncommitted_changes(ctx.repo_dir)
         if warning:
             stdout += warning
@@ -257,7 +248,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     finally:
         _release_git_lock(lock)
 
-    # Parse JSON output and account cost
     result = _parse_claude_output(stdout, ctx)
     result += _run_pytest(ctx.repo_dir)
     return result
