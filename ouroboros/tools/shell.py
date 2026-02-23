@@ -169,6 +169,30 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
         return stdout
 
 
+def _run_pytest(repo_dir: pathlib.Path) -> str:
+    """Run pytest -q --tb=short after an edit; returns summary or empty string if pytest unavailable."""
+    if not shutil.which("pytest"):
+        return ""
+    try:
+        res = subprocess.run(
+            ["pytest", "-q", "--tb=short"],
+            cwd=str(repo_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = (res.stdout + ("\n" + res.stderr if res.stderr.strip() else "")).strip()
+        if res.returncode == 0:
+            return f"\n\n--- pytest ---\n{output}"
+        else:
+            return f"\n\n⚠️ PYTEST FAILED (exit={res.returncode}):\n{output}"
+    except subprocess.TimeoutExpired:
+        return "\n\n⚠️ PYTEST TIMEOUT: exceeded 120s."
+    except Exception as e:
+        log.debug("Failed to run pytest after claude_code_edit: %s", e, exc_info=True)
+        return ""
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
@@ -234,7 +258,9 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         _release_git_lock(lock)
 
     # Parse JSON output and account cost
-    return _parse_claude_output(stdout, ctx)
+    result = _parse_claude_output(stdout, ctx)
+    result += _run_pytest(ctx.repo_dir)
+    return result
 
 
 def get_tools() -> List[ToolEntry]:

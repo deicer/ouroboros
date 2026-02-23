@@ -3,6 +3,7 @@ name = "ouroboros"
 version = "7.1.0"
 description = "Self-creating agent"
 requires-python = ">=3.10"
+dependencies = ["pytest>=7.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
