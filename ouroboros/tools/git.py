@@ -17,6 +17,35 @@ log = logging.getLogger(__name__)
 
 # --- Git lock ---
 
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but not signalable by current user.
+        return True
+    except Exception:
+        return False
+
+
+def _read_lock_meta(lock_path: pathlib.Path) -> Dict[str, str]:
+    meta: Dict[str, str] = {}
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return meta
+    for line in raw.splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        meta[k.strip()] = v.strip()
+    return meta
+
+
 def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir = ctx.drive_path("locks")
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -27,6 +56,14 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
         if lock_path.exists():
             try:
                 age = time.time() - lock_path.stat().st_mtime
+                meta = _read_lock_meta(lock_path)
+                pid_raw = meta.get("pid", "")
+                pid = int(pid_raw) if pid_raw.isdigit() else 0
+                # If lock owner process is dead, treat lock as stale immediately.
+                if pid and not _pid_is_alive(pid):
+                    lock_path.unlink()
+                    continue
+                # Legacy lock format (no pid) falls back to age-based stale cleanup.
                 if age > stale_sec:
                     lock_path.unlink()
                     continue
@@ -35,7 +72,11 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             try:
-                os.write(fd, f"locked_at={utc_now_iso()}\n".encode("utf-8"))
+                payload = (
+                    f"locked_at={utc_now_iso()}\n"
+                    f"pid={os.getpid()}\n"
+                )
+                os.write(fd, payload.encode("utf-8"))
             finally:
                 os.close(fd)
             return lock_path
