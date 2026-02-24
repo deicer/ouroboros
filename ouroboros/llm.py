@@ -17,6 +17,70 @@ log = logging.getLogger(__name__)
 DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
 
 
+def _env_model(name: str) -> str:
+    return str(os.environ.get(name, "") or "").strip()
+
+
+def _ordered_unique(items: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        v = str(item or "").strip()
+        if not v or v in seen:
+            continue
+        out.append(v)
+        seen.add(v)
+    return out
+
+
+def get_main_model_from_env() -> str:
+    main = _env_model("OUROBOROS_MODEL")
+    if not main:
+        raise RuntimeError("OUROBOROS_MODEL is required and must be non-empty")
+    return main
+
+
+def get_light_model_from_env() -> str:
+    light = _env_model("OUROBOROS_MODEL_LIGHT")
+    return light or get_main_model_from_env()
+
+
+def get_allowed_models_from_env() -> List[str]:
+    main = _env_model("OUROBOROS_MODEL")
+    code = _env_model("OUROBOROS_MODEL_CODE")
+    light = _env_model("OUROBOROS_MODEL_LIGHT")
+    fallback_raw = _env_model("OUROBOROS_MODEL_FALLBACK_LIST")
+    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()]
+    return _ordered_unique([main, code, light, *fallback_models])
+
+
+def get_fallback_models_from_env(active_model: str = "") -> List[str]:
+    active = str(active_model or "").strip()
+    main = _env_model("OUROBOROS_MODEL")
+    code = _env_model("OUROBOROS_MODEL_CODE")
+    light = _env_model("OUROBOROS_MODEL_LIGHT")
+    fallback_raw = _env_model("OUROBOROS_MODEL_FALLBACK_LIST")
+    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()]
+    candidates = _ordered_unique([*fallback_models, main, code, light])
+    return [m for m in candidates if m and m != active]
+
+
+def resolve_model_from_env(requested_model: str = "") -> str:
+    requested = str(requested_model or "").strip()
+    main = get_main_model_from_env()
+    allowed = get_allowed_models_from_env()
+    if requested and requested in allowed:
+        return requested
+    if requested and requested != main:
+        log.warning(
+            "Blocked non-env model '%s'; using OUROBOROS_MODEL='%s'. Allowed: %s",
+            requested,
+            main,
+            ", ".join(allowed) or "<empty>",
+        )
+    return main
+
+
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
     allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
     v = str(value or "").strip().lower()
@@ -157,6 +221,7 @@ class LLMClient:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
+        model = resolve_model_from_env(model)
         effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
@@ -226,7 +291,7 @@ class LLMClient:
         self,
         prompt: str,
         images: List[Dict[str, Any]],
-        model: str = "anthropic/claude-sonnet-4.6",
+        model: str = "",
         max_tokens: int = 1024,
         reasoning_effort: str = "low",
     ) -> Tuple[str, Dict[str, Any]]:
@@ -263,9 +328,10 @@ class LLMClient:
                 log.warning("vision_query: skipping image with unknown format: %s", list(img.keys()))
 
         messages = [{"role": "user", "content": content}]
+        resolved_model = resolve_model_from_env(model)
         response_msg, usage = self.chat(
             messages=messages,
-            model=model,
+            model=resolved_model,
             tools=None,
             reasoning_effort=reasoning_effort,
             max_tokens=max_tokens,
@@ -275,16 +341,11 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        return get_main_model_from_env()
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
-        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
-        light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
-        models = [main]
-        if code and code != main:
-            models.append(code)
-        if light and light != main and light != code:
-            models.append(light)
+        models = get_allowed_models_from_env()
+        if not models:
+            return [get_main_model_from_env()]
         return models

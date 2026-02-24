@@ -13,19 +13,16 @@ Two tools:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_VLM_MODEL = "anthropic/claude-sonnet-4.6"
-
-
-def _get_vlm_model() -> str:
-    """Get VLM model from env or use default."""
-    return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
+def _resolve_vlm_model(model: str = "") -> str:
+    """Resolve VLM model strictly from env-configured allowlist."""
+    from ouroboros.llm import resolve_model_from_env
+    return resolve_model_from_env(model)
 
 
 def _get_llm_client():
@@ -47,7 +44,7 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
             "First call browse_page(output='screenshot') or browser_action(action='screenshot')."
         )
 
-    vlm_model = model or _get_vlm_model()
+    vlm_model = _resolve_vlm_model(model)
 
     try:
         client = _get_llm_client()
@@ -81,7 +78,7 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
     else:
         images.append({"base64": image_base64, "mime": image_mime})
 
-    vlm_model = model or _get_vlm_model()
+    vlm_model = _resolve_vlm_model(model)
 
     try:
         client = _get_llm_client()

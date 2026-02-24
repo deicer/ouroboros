@@ -13,12 +13,18 @@ import pathlib
 import queue
 import threading
 import time
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import (
+    LLMClient,
+    normalize_reasoning_effort,
+    add_usage,
+    get_fallback_models_from_env,
+)
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
@@ -685,6 +691,19 @@ def run_llm_loop(
     stateful_executor = _StatefulToolExecutor()
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
+    # Anti-loop guard: remember recent repeated tool error signatures.
+    recent_error_sigs: deque[str] = deque(maxlen=12)
+    try:
+        repeated_error_threshold = max(2, int(os.environ.get("OUROBOROS_REPEAT_ERROR_THRESHOLD", "4")))
+    except (ValueError, TypeError):
+        repeated_error_threshold = 4
+        log.warning("Invalid OUROBOROS_REPEAT_ERROR_THRESHOLD, defaulting to 4")
+
+    try:
+        repeated_error_window_min = max(4, int(os.environ.get("OUROBOROS_REPEAT_ERROR_WINDOW_MIN", "6")))
+    except (ValueError, TypeError):
+        repeated_error_window_min = 6
+        log.warning("Invalid OUROBOROS_REPEAT_ERROR_WINDOW_MIN, defaulting to 6")
     try:
         MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
@@ -789,17 +808,9 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
-                # Configurable fallback priority list (Bible P3: no hardcoded behavior)
-                fallback_list_raw = os.environ.get(
-                    "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
-                )
-                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
-                fallback_model = None
-                for candidate in fallback_candidates:
-                    if candidate != active_model:
-                        fallback_model = candidate
-                        break
+                # Only allow fallback to models explicitly configured via env.
+                fallback_candidates = get_fallback_models_from_env(active_model=active_model)
+                fallback_model = fallback_candidates[0] if fallback_candidates else None
                 if fallback_model is None:
                     _append_thinking_trace(
                         drive_logs,
@@ -901,6 +912,44 @@ def run_llm_loop(
                 round_idx=round_idx,
                 details={"tool_count": len(tool_calls), "error_count": int(error_count)},
             )
+
+            # Detect repeated failure patterns (e.g. same Unknown tool) and stop early.
+            current_error_sig = _batch_error_signature(llm_trace, len(tool_calls))
+            if current_error_sig:
+                recent_error_sigs.append(current_error_sig)
+                if len(recent_error_sigs) >= repeated_error_window_min:
+                    top_sig, top_count = Counter(recent_error_sigs).most_common(1)[0]
+                    if top_count >= repeated_error_threshold:
+                        final = (
+                            f"⚠️ Stuck in repeated tool errors ({top_count} repeats in "
+                            f"last {len(recent_error_sigs)} rounds). "
+                            f"Last recurring error: {truncate_for_log(top_sig, 260)}. "
+                            "Stopping to avoid loop. Please adjust approach or tool availability."
+                        )
+                        _append_thinking_trace(
+                            drive_logs,
+                            source="task_loop",
+                            step="repeated_error_guard_stop",
+                            task_id=task_id,
+                            task_type=task_type or "task",
+                            round_idx=round_idx,
+                            details={
+                                "top_error_signature": top_sig,
+                                "top_error_count": top_count,
+                                "window_size": len(recent_error_sigs),
+                                "threshold": repeated_error_threshold,
+                            },
+                        )
+                        append_jsonl(drive_logs / "events.jsonl", {
+                            "ts": utc_now_iso(),
+                            "type": "task_loop_guard_stop",
+                            "task_id": task_id,
+                            "reason": "repeated_tool_errors",
+                            "error_signature": truncate_for_log(top_sig, 500),
+                            "repeat_count": int(top_count),
+                            "window_size": int(len(recent_error_sigs)),
+                        })
+                        return final, accumulated_usage, llm_trace
 
             # --- Budget guard ---
             # LLM decides when to stop (Bible P0, P3). We only enforce hard budget limit.
@@ -1153,3 +1202,27 @@ def _safe_args(v: Any) -> Any:
     except Exception:
         log.debug("Failed to serialize args for trace logging", exc_info=True)
         return {"_repr": repr(v)}
+
+
+def _batch_error_signature(llm_trace: Dict[str, Any], batch_size: int) -> str:
+    """Build a stable signature for error results in the latest tool batch."""
+    if batch_size <= 0:
+        return ""
+    tool_calls = llm_trace.get("tool_calls") or []
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return ""
+
+    recent = tool_calls[-batch_size:]
+    sigs: List[str] = []
+    for item in recent:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("is_error")):
+            continue
+        tool = str(item.get("tool") or "unknown")
+        result = str(item.get("result") or "")
+        sigs.append(f"{tool}: {truncate_for_log(result, 220)}")
+    if not sigs:
+        return ""
+    # Sort + dedupe for stability when parallel tool execution changes order.
+    return " | ".join(sorted(set(sigs)))

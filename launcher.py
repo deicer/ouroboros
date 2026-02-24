@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ouroboros.apply_patch import install as install_apply_patch
-from ouroboros.llm import DEFAULT_LIGHT_MODEL
 install_apply_patch()
 
 # ----------------------------
@@ -35,8 +34,10 @@ def get_secret(name: str, default: Optional[str] = None, required: bool = False)
 
 def get_cfg(name: str, default: Optional[str] = None) -> Optional[str]:
     v = os.environ.get(name)
-    if v is not None and str(v).strip() != "":
-        return v
+    if v is not None:
+        v = str(v).strip()
+        if v != "":
+            return v
     return default
 
 
@@ -59,9 +60,10 @@ GITHUB_REPO = get_cfg("GITHUB_REPO")
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your .env file."
 assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your .env file."
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5") or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6")
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-opus-4-6")
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL)
+MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="")
+assert MODEL_MAIN and str(MODEL_MAIN).strip(), "OUROBOROS_MODEL not set. Set it in .env."
+MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="")
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default="")
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600") or "600"))
@@ -83,10 +85,15 @@ os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY or "")
 os.environ["OPENCODE_API_KEY"] = str(OPENCODE_API_KEY or "")
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
-os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
-os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
+os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN)
+if MODEL_CODE:
+    os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE)
+else:
+    os.environ.pop("OUROBOROS_MODEL_CODE", None)
 if MODEL_LIGHT:
     os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
+else:
+    os.environ.pop("OUROBOROS_MODEL_LIGHT", None)
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)

@@ -664,8 +664,8 @@ def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
     )
 
     try:
-        from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
-        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+        from ouroboros.llm import LLMClient, get_light_model_from_env
+        light_model = get_light_model_from_env()
         client = LLMClient()
         resp_msg, _usage = client.chat(
             messages=[{"role": "user", "content": prompt}],

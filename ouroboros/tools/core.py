@@ -23,12 +23,33 @@ def _resolve_read_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
         raise ValueError("path must not be empty")
 
     root_resolved = root.resolve()
-    candidate = pathlib.Path(p).resolve() if pathlib.Path(p).is_absolute() else (root / safe_relpath(p)).resolve()
+    candidates: List[pathlib.Path] = []
 
-    # Enforce candidate is inside root
-    if candidate != root_resolved and root_resolved not in candidate.parents:
-        raise ValueError(f"path outside allowed root: {p}")
-    return candidate
+    if pathlib.Path(p).is_absolute():
+        candidates.append(pathlib.Path(p).resolve())
+
+        # Legacy compatibility: old prompts and logs may reference /app/<...> paths.
+        # Current project layout keeps code under <repo>/ouroboros/, so try both.
+        if p.startswith("/app/"):
+            app_rel = p[len("/app/"):]
+            if app_rel:
+                candidates.append((root_resolved / safe_relpath(app_rel)).resolve())
+                candidates.append((root_resolved / "ouroboros" / safe_relpath(app_rel)).resolve())
+    else:
+        candidates.append((root_resolved / safe_relpath(p)).resolve())
+
+    # Prefer existing candidates inside root.
+    for candidate in candidates:
+        if candidate == root_resolved or root_resolved in candidate.parents:
+            if candidate.exists():
+                return candidate
+
+    # Fallback to the first candidate inside root (for consistent "not found" messages).
+    for candidate in candidates:
+        if candidate == root_resolved or root_resolved in candidate.parents:
+            return candidate
+
+    raise ValueError(f"path outside allowed root: {p}")
 
 
 def _apply_read_limit(text: str, limit: int | None) -> str:
@@ -62,7 +83,16 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
 
 
 def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
-    file_path = _resolve_read_path(ctx.repo_dir, path)
+    try:
+        file_path = _resolve_read_path(ctx.repo_dir, path)
+    except Exception as e:
+        return f"⚠️ PATH_ERROR: {e}"
+
+    if file_path.is_dir():
+        rel = file_path.relative_to(ctx.repo_dir) if file_path != ctx.repo_dir else pathlib.Path(".")
+        return f"⚠️ repo_read expects a file, got directory: {rel.as_posix()}. Use repo_list."
+    if not file_path.exists():
+        return f"⚠️ File not found: {path} (resolved: {file_path})"
     return _apply_read_limit(read_text(file_path), limit)
 
 
@@ -71,7 +101,16 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
 
 
 def _drive_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
-    file_path = _resolve_read_path(ctx.drive_root, path)
+    try:
+        file_path = _resolve_read_path(ctx.drive_root, path)
+    except Exception as e:
+        return f"⚠️ PATH_ERROR: {e}"
+
+    if file_path.is_dir():
+        rel = file_path.relative_to(ctx.drive_root) if file_path != ctx.drive_root else pathlib.Path(".")
+        return f"⚠️ drive_read expects a file, got directory: {rel.as_posix()}. Use drive_list."
+    if not file_path.exists():
+        return f"⚠️ File not found: {path} (resolved: {file_path})"
     return _apply_read_limit(read_text(file_path), limit)
 
 
@@ -229,7 +268,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
     """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    from ouroboros.llm import LLMClient, get_light_model_from_env
 
     # Read last_n messages from chat.jsonl
     chat_path = ctx.drive_root / "logs" / "chat.jsonl"
@@ -286,7 +325,7 @@ Now write a comprehensive summary:"""
 
         # Call LLM
         llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        model = get_light_model_from_env()
 
         messages = [
             {"role": "user", "content": prompt}

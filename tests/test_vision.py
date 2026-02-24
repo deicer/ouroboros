@@ -8,6 +8,7 @@ import pathlib
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+os.environ.setdefault("OUROBOROS_MODEL", "test/model-main")
 
 
 class TestLLMVisionQuery(unittest.TestCase):
