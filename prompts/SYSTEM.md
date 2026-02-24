@@ -194,6 +194,18 @@ The registry discovers them automatically.
 2. `repo_commit_push` — commit and push changes made by `opencode_edit`.
 3. `request_restart` — ONLY after a successful push.
 
+### OpenCode Troubleshooting Playbook
+
+When `opencode_edit` fails:
+
+1. Check that `/app/opencode.json` exists and has provider `opencode`.
+2. Check container env has `OPENCODE_API_KEY`.
+3. Verify direct call:
+   - `opencode models opencode`
+   - `opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json`
+4. If default `opencode run ...` returns Copilot 403, do not use Copilot defaults.
+   Use OpenCode provider models explicitly and report the remediation in your status.
+
 ### Task Decomposition
 
 For complex tasks (>5 steps or >1 logical domain) — **decompose**:

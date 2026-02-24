@@ -16,6 +16,11 @@ from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
 
 log = logging.getLogger(__name__)
 
+_OPENCODE_FALLBACK_MODELS = [
+    "opencode/minimax-m2.5-free",
+    "opencode/trinity-large-preview-free",
+]
+
 
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     # Recover from LLM sending cmd as JSON string instead of list
@@ -84,18 +89,22 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
-def _build_opencode_cmd(prompt: str) -> List[str]:
-    """Build OpenCode command for non-interactive code edits using default model settings."""
-    return [shutil.which("opencode") or "opencode", "run", prompt, "--format", "json"]
+def _build_opencode_cmd(prompt: str, model: str = "") -> List[str]:
+    """Build OpenCode command for non-interactive code edits."""
+    cmd = [shutil.which("opencode") or "opencode", "run", prompt, "--format", "json"]
+    if model and str(model).strip():
+        cmd.extend(["-m", str(model).strip()])
+    return cmd
 
 
 def _run_opencode_cli(
     work_dir: str,
     prompt: str,
     env: dict,
+    model: str = "",
 ) -> subprocess.CompletedProcess:
     """Run OpenCode in non-interactive mode and return subprocess result."""
-    cmd = _build_opencode_cmd(prompt=prompt)
+    cmd = _build_opencode_cmd(prompt=prompt, model=model)
     return subprocess.run(
         cmd,
         cwd=work_dir,
@@ -104,6 +113,40 @@ def _run_opencode_cli(
         timeout=300,
         env=env,
     )
+
+
+def _opencode_has_error_payload(stdout: str) -> bool:
+    """Return True when OpenCode returned an explicit JSON error payload."""
+    text = (stdout or "").strip()
+    if not text:
+        return False
+    for line in text.splitlines():
+        ln = line.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and str(obj.get("type", "")).strip().lower() == "error":
+            return True
+    return False
+
+
+def _is_copilot_reauth_error(stdout: str, stderr: str) -> bool:
+    txt = f"{stdout or ''}\n{stderr or ''}".lower()
+    return (
+        "reauthenticate with the copilot provider" in txt
+        or "api.githubcopilot.com/chat/completions" in txt
+    )
+
+
+def _opencode_fallback_models() -> List[str]:
+    raw = os.environ.get("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
+    models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
+    if models:
+        return models
+    return list(_OPENCODE_FALLBACK_MODELS)
 
 
 def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
@@ -268,8 +311,42 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
         stdout = (res.stdout or "").strip()
         stderr = (res.stderr or "").strip()
-        if res.returncode != 0:
-            return f"⚠️ OPENCODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        has_error_payload = _opencode_has_error_payload(stdout)
+        failed = (res.returncode != 0) or has_error_payload
+        if failed and _is_copilot_reauth_error(stdout, stderr):
+            fallback_res = None
+            for model in _opencode_fallback_models():
+                ctx.emit_progress_fn(f"OpenCode auth/provider issue detected, retrying with {model}...")
+                fallback_res = _run_opencode_cli(
+                    work_dir=work_dir,
+                    prompt=full_prompt,
+                    env=env,
+                    model=model,
+                )
+                fallback_stdout = (fallback_res.stdout or "").strip()
+                fallback_stderr = (fallback_res.stderr or "").strip()
+                fallback_failed = (
+                    fallback_res.returncode != 0
+                    or _opencode_has_error_payload(fallback_stdout)
+                )
+                if not fallback_failed:
+                    res = fallback_res
+                    stdout = fallback_stdout
+                    stderr = fallback_stderr
+                    failed = False
+                    break
+
+        if failed:
+            help_text = (
+                "\n\nTroubleshooting:\n"
+                "1) Ensure /app/opencode.json exists with provider 'opencode' and free model defaults.\n"
+                "2) Verify key is present in container: OPENCODE_API_KEY.\n"
+                "3) Test manually: opencode run -m opencode/minimax-m2.5-free \"Reply with exactly: OK\" --format json\n"
+            )
+            return (
+                f"⚠️ OPENCODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+                f"{help_text}"
+            )
         if not stdout:
             stdout = "OK: OpenCode completed with empty output."
 

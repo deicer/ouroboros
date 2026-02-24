@@ -1,0 +1,8 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "enabled_providers": [
+    "opencode"
+  ],
+  "model": "opencode/trinity-large-preview-free",
+  "small_model": "opencode/minimax-m2.5-free"
+}

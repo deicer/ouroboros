@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance for coding agents working with code in this repository.
 
 ## Project Overview
 
@@ -50,7 +50,8 @@ Three-layer design:
 
 `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`
 
-Optional for code-editing provider setup: `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`
+Optional for code-editing provider setup: `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`.
+Project defaults for OpenCode live in `opencode.json` (provider `opencode` + free models).
 
 ## Key Files
 

@@ -74,7 +74,7 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 | `TELEGRAM_BOT_TOKEN` | Yes | Create a bot via [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`), copy the token |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) -- Fine-grained token with **Contents: Read and write** on your fork |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
-| `OPENCODE_API_KEY` | No | Optional OpenCode auth key (depends on your OpenCode provider setup) |
+| `OPENCODE_API_KEY` | No | OpenCode API key for OpenCode Zen provider (including free models) |
 | `ANTHROPIC_API_KEY` | No | Optional provider key (for OpenCode/provider integrations) |
 | `TOTAL_BUDGET` | No | Fallback spending limit in USD if OpenRouter key has no limit set |
 
@@ -124,6 +124,18 @@ You should see: `Owner registered. Ouroboros online.`
 | Rebuild after code changes | `docker compose up -d --build` |
 
 The container auto-restarts on failure. Use `/restart` in Telegram for soft restart, `/panic` to hard stop. All state persists in a Docker volume -- survives restarts and rebuilds.
+
+### OpenCode Quick Check
+
+If code editing fails, run:
+
+```bash
+docker compose exec -T ouroboros opencode --version
+docker compose exec -T ouroboros opencode models opencode
+docker compose exec -T ouroboros opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json
+```
+
+If default `opencode run ...` returns Copilot 403, ensure `/app/opencode.json` exists and points to provider `opencode`.
 
 ---
 
@@ -186,7 +198,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | Enables the `web_search` tool |
-| `OPENCODE_API_KEY` | Optional auth key used by OpenCode CLI (if required by your setup) |
+| `OPENCODE_API_KEY` | OpenCode API key for OpenCode Zen provider (including free models) |
 | `ANTHROPIC_API_KEY` | Optional provider key for OpenCode/provider integrations |
 | `TOTAL_BUDGET` | Fallback spending limit in USD (only used if OpenRouter key has no limit set) |
 
@@ -228,11 +240,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ### v7.1.1 -- OpenCode CLI for code editing
 - Added `opencode_edit` as the sole code-editing tool.
 - Docker image and E2E image install OpenCode CLI.
-- `.env` adds optional `OPENCODE_API_KEY`.
+- `.env` includes `OPENCODE_API_KEY` and project-level `opencode.json` for reliable default provider/model.
 
 ### v7.1.0 -- Claude Code CLI as sole code editing path
 - **ANTHROPIC_API_KEY is now required** -- Claude Code CLI is the only way the agent edits its own code.
-- **Removed `repo_write_commit` tool** -- No more direct file writes to the repo. All edits go through `claude_code_edit` -> `repo_commit_push`.
+- **Removed `repo_write_commit` tool** -- No more direct file writes to the repo. All edits go through `opencode_edit` -> `repo_commit_push`.
 
 ### v7.0.0 -- Philosophy v4.0: User-Driven Self-Development
 - **BREAKING: New Bible (v4.0)** -- Complete philosophical shift from "autonomous becoming" to "helpful AI that develops itself while serving the user."
@@ -255,7 +267,7 @@ Full text: [BIBLE.md](BIBLE.md)
 - **Fix: health invariant #5** -- `owner_message_injected` events now properly logged to events.jsonl for duplicate processing detection.
 - **Fix: shell cmd parsing** -- `str.split()` replaced with `shlex.split()` for proper shell quoting support.
 - **Fix: retry task_id** -- timeout retries now get a new task_id with `original_task_id` lineage tracking.
-- **claude_code_edit timeout** -- aligned subprocess and tool wrapper to 300s.
+- **opencode_edit timeout** -- aligned subprocess and tool wrapper to 300s.
 - **Direct chat guard** -- `schedule_task` from direct chat now logged as warning for audit.
 
 ### v6.1.0 -- Budget Optimization: Selective Schemas + Self-Check + Dedup

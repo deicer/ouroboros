@@ -372,7 +372,7 @@ Self-improvement в этой архитектуре выглядит так:
 - `GITHUB_TOKEN` (для git push в ваш fork)
 - `GITHUB_USER`
 - `GITHUB_REPO`
-- `OPENCODE_API_KEY` (опционально, если требуется вашей OpenCode-конфигурации)
+- `OPENCODE_API_KEY` (ключ OpenCode Zen; обязателен для встроенных free-моделей)
 - `ANTHROPIC_API_KEY` (опционально, если используется соответствующий provider в OpenCode)
 
 Опциональные:
@@ -386,6 +386,16 @@ Self-improvement в этой архитектуре выглядит так:
 - `OUROBOROS_MAX_WORKERS`, `OUROBOROS_MAX_ROUNDS`
 - `OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`
 - `OUROBOROS_BG_BUDGET_PCT`
+- `OUROBOROS_OPENCODE_FALLBACK_MODELS` (опционально: список fallback-моделей OpenCode через запятую)
+
+Быстрая диагностика OpenCode (внутри контейнера):
+
+- `opencode --version`
+- `opencode models opencode`
+- `opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json`
+- Если default-вызов `opencode run ...` падает с Copilot 403:
+  - проверь `/app/opencode.json` (provider должен быть `opencode`);
+  - проверь, что в env присутствует `OPENCODE_API_KEY`.
 
 ## Telegram команды (supervisor)
 
