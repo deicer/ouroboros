@@ -194,6 +194,45 @@ def test_estimate_tokens():
     assert 5 <= tokens <= 20
 
 
+def test_budget_guard_ignores_non_positive_remaining():
+    from ouroboros.loop import _check_budget_limits
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result_zero = _check_budget_limits(
+            budget_remaining_usd=0.0,
+            accumulated_usage={"cost": 999.0},
+            round_idx=1,
+            messages=[],
+            llm=object(),
+            active_model="test/model",
+            active_effort="low",
+            max_retries=1,
+            drive_logs=pathlib.Path(tmp),
+            task_id="t-zero",
+            event_queue=None,
+            llm_trace={"assistant_notes": [], "tool_calls": []},
+            task_type="task",
+        )
+        result_negative = _check_budget_limits(
+            budget_remaining_usd=-1.0,
+            accumulated_usage={"cost": 999.0},
+            round_idx=1,
+            messages=[],
+            llm=object(),
+            active_model="test/model",
+            active_effort="low",
+            max_retries=1,
+            drive_logs=pathlib.Path(tmp),
+            task_id="t-negative",
+            event_queue=None,
+            llm_trace={"assistant_notes": [], "tool_calls": []},
+            task_type="task",
+        )
+
+    assert result_zero is None
+    assert result_negative is None
+
+
 # ── Memory ───────────────────────────────────────────────────────
 
 def test_memory_scratchpad():

@@ -417,11 +417,13 @@ def _check_budget_limits(
         None if budget is OK (continue loop)
         (final_text, accumulated_usage, llm_trace) if budget exceeded (stop loop)
     """
-    if budget_remaining_usd is None:
+    # If remaining budget is unknown or non-positive, do not hard-stop the loop.
+    # This keeps the bot operational even when external budget telemetry reports 0.
+    if budget_remaining_usd is None or budget_remaining_usd <= 0:
         return None
 
     task_cost = accumulated_usage.get("cost", 0)
-    budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
+    budget_pct = task_cost / budget_remaining_usd
 
     if budget_pct > 0.5:
         # Hard stop — protect the budget
