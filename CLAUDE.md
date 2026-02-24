@@ -1,69 +1,69 @@
 # CLAUDE.md
 
-This file provides guidance for coding agents working with code in this repository.
+Этот файл содержит инструкции для coding-агентов, работающих с кодом в этом репозитории.
 
-## Project Overview
+## Обзор проекта
 
-Ouroboros is a self-developing AI agent that rewrites its own code, improves itself, and maintains persistent identity across restarts. It runs in Docker on a VPS, uses a data volume (`/data/`) for persistence, communicates via Telegram, and pushes changes to its own GitHub fork. Governed by a philosophical constitution (BIBLE.md) with 18 sections.
+Ouroboros — самоулучшающийся ИИ-агент, который переписывает собственный код, совершенствует себя и сохраняет непрерывную идентичность между перезапусками. Работает в Docker на VPS, использует том данных (`/data/`) для персистентности, общается через Telegram, и отправляет изменения в собственный форк на GitHub. Управляется философской конституцией (BIBLE.md) из 18 разделов.
 
-## Commands
+## Команды
 
 ```bash
-make test        # Run smoke tests (pytest, ~131 tests, fast, no external deps)
-make test-v      # Verbose test output
-make test-e2e    # E2E tests in Docker (requires API keys in .env, runs real LLM)
-make health      # Code complexity metrics
-make clean       # Clean __pycache__, .pyc, .pytest_cache
+make test        # Запустить smoke-тесты (pytest, ~131 тест, быстро, без внешних зависимостей)
+make test-v      # Подробный вывод тестов
+make test-e2e    # E2E тесты в Docker (требует API-ключи в .env, запускает реальный LLM)
+make health      # Метрики сложности кода
+make clean       # Очистить __pycache__, .pyc, .pytest_cache
 
-# Run a single test
+# Запустить один тест
 python3 -m pytest tests/test_smoke.py::test_name -v
 ```
 
-## Linting
+## Линтинг
 
-Ruff configured in `pyproject.toml`: line-length 120, Python 3.10+, rules E/F/W/I, E501 ignored.
+Ruff настроен в `pyproject.toml`: длина строки 120, Python 3.10+, правила E/F/W/I, E501 игнорируется.
 
-## Architecture
+## Архитектура
 
-Three-layer design:
+Трёхслойная структура:
 
-**Layer 1 — Supervisor** (`supervisor/`): Process management, Telegram client, task queue, worker lifecycle, persistent state on data volume, git operations, event dispatch.
+**Слой 1 — Supervisor** (`supervisor/`): Управление процессами, Telegram-клиент, очередь задач, жизненный цикл воркеров, персистентное состояние на томе данных, git-операции, диспетчеризация событий.
 
-**Layer 2 — Agent Core** (`ouroboros/`): Per-worker agent instance. `agent.py` orchestrates message->context->tools. `loop.py` is the core LLM tool execution loop. `llm.py` is the sole OpenRouter API client. `context.py` assembles LLM context. `memory.py` manages scratchpad, identity, user context, and chat history. `consciousness.py` runs background thinking between tasks.
+**Слой 2 — Ядро агента** (`ouroboros/`): Экземпляр агента на воркер. `agent.py` оркестрирует сообщение→контекст→инструменты. `loop.py` — основной цикл выполнения LLM-инструментов. `llm.py` — единственный API-клиент OpenRouter. `context.py` собирает LLM-контекст. `memory.py` управляет заметками, идентичностью, контекстом пользователя и историей чата. `consciousness.py` запускает фоновое мышление между задачами.
 
-**Layer 3 — Tools** (`ouroboros/tools/`): Plugin registry with auto-discovery. Each module exports `get_tools()` returning `List[ToolEntry]`. `registry.py` is the SSOT — it collects all tools via `pkgutil.iter_modules()`. ~33 tools total. Every tool receives a `ToolContext` dataclass with repo dir, Drive root, task ID, event queue, browser state.
+**Слой 3 — Инструменты** (`ouroboros/tools/`): Реестр плагинов с автообнаружением. Каждый модуль экспортирует `get_tools()`, возвращающий `List[ToolEntry]`. `registry.py` — единый источник истины (SSOT), собирает все инструменты через `pkgutil.iter_modules()`. Всего ~33 инструмента. Каждый инструмент получает датакласс `ToolContext` с директорией репозитория, корнем Drive, ID задачи, очередью событий, состоянием браузера.
 
-**Entry points**: `launcher.py` -> `supervisor/workers.py` -> `ouroboros/agent.py` -> `ouroboros/loop.py`.
+**Точки входа**: `launcher.py` -> `supervisor/workers.py` -> `ouroboros/agent.py` -> `ouroboros/loop.py`.
 
-**Persistence**: All state lives on the data volume at `/data/` (JSON state files, JSONL event logs, markdown memory files). No database. Atomic writes with file locks.
+**Персистентность**: Всё состояние хранится на томе данных в `/data/` (JSON-файлы состояния, JSONL-логи событий, markdown-файлы памяти). Без базы данных. Атомарная запись с блокировками файлов.
 
-## Key Conventions
+## Ключевые соглашения
 
-- **SSOT pattern**: state.py owns state, llm.py owns API calls, registry.py owns tools. No duplicate definitions.
-- **Minimalism (Bible section 8)**: Modules should fit in LLM context (~1000 lines). Methods >150 lines signal decomposition needed.
-- **Versioning (Bible section 15)**: `VERSION` file == git tags == README changelog. Philosophy changes = MAJOR bump.
-- **Tool auto-discovery**: Add a new tool by creating `ouroboros/tools/new_tool.py` with a `get_tools()` function. No registration code needed.
-- **BIBLE.md is the protected core** (Bible section 17): Cannot be deleted, gutted, or replaced wholesale. Changes require user approval and MAJOR version bump.
-- **Self-improvements require user approval** unless `/no-approve` mode is active (Bible section 7).
+- **Паттерн SSOT**: state.py владеет состоянием, llm.py — API-вызовами, registry.py — инструментами. Без дублирующих определений.
+- **Минимализм (раздел 8 Библии)**: Модули должны помещаться в контекстное окно LLM (~1000 строк). Методы >150 строк — сигнал к декомпозиции.
+- **Версионирование (раздел 15 Библии)**: Файл `VERSION` == git-теги == changelog в README. Изменения философии = MAJOR-бамп.
+- **Автообнаружение инструментов**: Создать новый инструмент можно добавив `ouroboros/tools/new_tool.py` с функцией `get_tools()`. Регистрация не нужна.
+- **BIBLE.md — защищённое ядро** (раздел 17 Библии): Нельзя удалить, выхолостить или заменить целиком. Изменения требуют одобрения пользователя и MAJOR-бампа версии.
+- **Самоулучшения требуют одобрения пользователя**, если не активен режим `/no-approve` (раздел 7 Библии).
 
-## Required Environment Variables
+## Обязательные переменные окружения
 
 `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`
 
-Optional for code-editing provider setup: `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`.
-Project defaults for OpenCode live in `opencode.json` (provider `opencode` + free models).
+Опционально для настройки провайдера редактирования кода: `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`.
+Дефолты проекта для OpenCode хранятся в `opencode.json` (провайдер `opencode` + бесплатные модели).
 
-## Key Files
+## Ключевые файлы
 
-| File | Role |
+| Файл | Роль |
 |------|------|
-| `BIBLE.md` | Constitution (18 sections, Philosophy v4.0) |
-| `prompts/SYSTEM.md` | Main system prompt |
-| `prompts/CONSCIOUSNESS.md` | Background consciousness prompt |
-| `ouroboros/loop.py` | Core LLM tool execution loop (largest module) |
-| `ouroboros/agent.py` | Per-worker orchestrator |
-| `ouroboros/tools/registry.py` | Tool plugin system (SSOT) |
-| `supervisor/state.py` | Persistent state management |
-| `supervisor/workers.py` | Worker process lifecycle |
-| `launcher.py` | Main entry point (Docker VPS) |
-| `tests/e2e/harness.py` | E2E test harness (Docker-sandboxed, real LLM) |
+| `BIBLE.md` | Конституция (18 разделов, Философия v4.0) |
+| `prompts/SYSTEM.md` | Главный системный промпт |
+| `prompts/CONSCIOUSNESS.md` | Промпт фонового сознания |
+| `ouroboros/loop.py` | Основной цикл выполнения LLM-инструментов (самый большой модуль) |
+| `ouroboros/agent.py` | Оркестратор на воркер |
+| `ouroboros/tools/registry.py` | Система плагинов инструментов (SSOT) |
+| `supervisor/state.py` | Управление персистентным состоянием |
+| `supervisor/workers.py` | Жизненный цикл процессов воркеров |
+| `launcher.py` | Главная точка входа (Docker VPS) |
+| `tests/e2e/harness.py` | Среда E2E-тестирования (в Docker-песочнице, с реальным LLM) |

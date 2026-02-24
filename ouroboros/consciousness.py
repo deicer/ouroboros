@@ -173,6 +173,32 @@ class BackgroundConsciousness:
             log.warning("Failed to check background consciousness budget", exc_info=True)
             return True
 
+    def _append_thinking_trace(
+        self,
+        step: str,
+        round_idx: int = 0,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "ts": utc_now_iso(),
+            "source": "consciousness",
+            "step": step,
+        }
+        if round_idx > 0:
+            payload["round"] = round_idx
+        if details:
+            safe_details: Dict[str, Any] = {}
+            for k, v in details.items():
+                if isinstance(v, str):
+                    safe_details[k] = truncate_for_log(v, 1200)
+                else:
+                    safe_details[k] = v
+            payload["details"] = safe_details
+        try:
+            append_jsonl(self._drive_root / "logs" / "thinking_trace.jsonl", payload)
+        except Exception:
+            log.debug("Failed to append consciousness thinking_trace", exc_info=True)
+
     # -------------------------------------------------------------------
     # Think cycle
     # -------------------------------------------------------------------
@@ -198,6 +224,11 @@ class BackgroundConsciousness:
             for round_idx in range(1, self._MAX_BG_ROUNDS + 1):
                 if self._paused:
                     break
+                self._append_thinking_trace(
+                    "round_start",
+                    round_idx=round_idx,
+                    details={"model": model, "message_count": len(messages)},
+                )
                 msg, usage = self._llm.chat(
                     messages=messages,
                     model=model,
@@ -243,6 +274,15 @@ class BackgroundConsciousness:
 
                 content = msg.get("content") or ""
                 tool_calls = msg.get("tool_calls") or []
+                self._append_thinking_trace(
+                    "llm_response",
+                    round_idx=round_idx,
+                    details={
+                        "assistant_preview": content[:300],
+                        "tool_count": len(tool_calls),
+                        "tool_names": [tc.get("function", {}).get("name", "") for tc in tool_calls[:20]],
+                    },
+                )
 
                 if self._paused:
                     break
@@ -250,6 +290,11 @@ class BackgroundConsciousness:
                 # If we have content but no tool calls, we're done
                 if content and not tool_calls:
                     final_content = content
+                    self._append_thinking_trace(
+                        "final_response",
+                        round_idx=round_idx,
+                        details={"response_preview": content[:400]},
+                    )
                     break
 
                 # If we have tool calls, execute them and continue loop
@@ -284,6 +329,11 @@ class BackgroundConsciousness:
                 "rounds": round_idx,
                 "model": model,
             })
+            self._append_thinking_trace(
+                "cycle_done",
+                round_idx=round_idx,
+                details={"thought_preview": (final_content or "")[:300], "cost_usd": total_cost},
+            )
 
         except Exception as e:
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
@@ -291,6 +341,11 @@ class BackgroundConsciousness:
                 "type": "consciousness_llm_error",
                 "error": repr(e),
             })
+            self._append_thinking_trace(
+                "cycle_error",
+                round_idx=round_idx,
+                details={"error": repr(e)},
+            )
 
     # -------------------------------------------------------------------
     # Context building (lightweight)
@@ -485,6 +540,15 @@ class BackgroundConsciousness:
             "args": args_for_log,
             "result_preview": sanitize_tool_result_for_log(truncate_for_log(result_str, 2000)),
         })
+        self._append_thinking_trace(
+            "tool_result",
+            details={
+                "tool": fn_name,
+                "args": args_for_log,
+                "result_preview": truncate_for_log(result_str, 700),
+                "is_error": bool(error is not None or str(result_str).startswith("[TIMEOUT") or str(result_str).startswith("Error:")),
+            },
+        )
 
         return result_str
 

@@ -132,6 +132,42 @@ def _truncate_tool_result(result: Any) -> str:
     return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
 
 
+def _append_thinking_trace(
+    drive_logs: pathlib.Path,
+    *,
+    source: str,
+    step: str,
+    task_id: str = "",
+    task_type: str = "",
+    round_idx: int = 0,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append a structured thought-like trace event (observable decisions only)."""
+    payload = {
+        "ts": utc_now_iso(),
+        "source": source,
+        "step": step,
+    }
+    if task_id:
+        payload["task_id"] = task_id
+    if task_type:
+        payload["task_type"] = task_type
+    if round_idx > 0:
+        payload["round"] = round_idx
+    if details:
+        safe_details: Dict[str, Any] = {}
+        for k, v in details.items():
+            if isinstance(v, str):
+                safe_details[k] = truncate_for_log(v, 1200)
+            else:
+                safe_details[k] = v
+        payload["details"] = safe_details
+    try:
+        append_jsonl(drive_logs / "thinking_trace.jsonl", payload)
+    except Exception:
+        log.debug("Failed to append thinking_trace", exc_info=True)
+
+
 def _execute_single_tool(
     tools: ToolRegistry,
     tc: Dict[str, Any],
@@ -335,6 +371,8 @@ def _handle_tool_calls(
     messages: List[Dict[str, Any]],
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
+    round_idx: int,
+    task_type: str = "task",
 ) -> int:
     """
     Execute tool calls and append results to messages.
@@ -377,7 +415,16 @@ def _handle_tool_calls(
             executor.shutdown(wait=False, cancel_futures=True)
 
     # Process results in original order
-    return _process_tool_results(results, messages, llm_trace, emit_progress)
+    return _process_tool_results(
+        results,
+        messages,
+        llm_trace,
+        emit_progress,
+        drive_logs,
+        task_id,
+        round_idx,
+        task_type,
+    )
 
 
 def _handle_text_response(
@@ -647,10 +694,32 @@ def run_llm_loop(
     try:
         while True:
             round_idx += 1
+            _append_thinking_trace(
+                drive_logs,
+                source="task_loop",
+                step="round_start",
+                task_id=task_id,
+                task_type=task_type or "task",
+                round_idx=round_idx,
+                details={
+                    "active_model": active_model,
+                    "reasoning_effort": active_effort,
+                    "message_count": len(messages),
+                },
+            )
 
             # Hard limit on rounds to prevent runaway tasks
             if round_idx > MAX_ROUNDS:
                 finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="round_limit_reached",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"max_rounds": MAX_ROUNDS, "finish_reason": finish_reason},
+                )
                 messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
                 try:
                     final_msg, final_cost = _call_llm_with_retry(
@@ -670,11 +739,31 @@ def run_llm_loop(
             # Apply LLM-driven model/effort switch (via switch_model tool)
             ctx = tools._ctx
             if ctx.active_model_override:
+                prev_model = active_model
                 active_model = ctx.active_model_override
                 ctx.active_model_override = None
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="model_switch",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"from": prev_model, "to": active_model},
+                )
             if ctx.active_effort_override:
+                prev_effort = active_effort
                 active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
                 ctx.active_effort_override = None
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="effort_switch",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"from": prev_effort, "to": active_effort},
+                )
 
             # Inject owner messages (in-process queue + Drive mailbox)
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
@@ -712,6 +801,15 @@ def run_llm_loop(
                         fallback_model = candidate
                         break
                 if fallback_model is None:
+                    _append_thinking_trace(
+                        drive_logs,
+                        source="task_loop",
+                        step="fallback_failed",
+                        task_id=task_id,
+                        task_type=task_type or "task",
+                        round_idx=round_idx,
+                        details={"active_model": active_model, "reason": "no_distinct_fallback_model"},
+                    )
                     return (
                         f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
                         f"All fallback models match the active one. Try rephrasing your request."
@@ -720,6 +818,15 @@ def run_llm_loop(
                 # Emit progress message so user sees fallback happening
                 fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
                 emit_progress(fallback_progress)
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="fallback_model_selected",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"from": active_model, "to": fallback_model},
+                )
 
                 # Try fallback model (don't increment round_idx — this is still same logical round)
                 msg, fallback_cost = _call_llm_with_retry(
@@ -729,6 +836,15 @@ def run_llm_loop(
 
                 # If fallback also fails, give up
                 if msg is None:
+                    _append_thinking_trace(
+                        drive_logs,
+                        source="task_loop",
+                        step="fallback_failed",
+                        task_id=task_id,
+                        task_type=task_type or "task",
+                        round_idx=round_idx,
+                        details={"fallback_model": fallback_model, "reason": "empty_response_after_retries"},
+                    )
                     return (
                         f"⚠️ Failed to get a response from the model after {max_retries} attempts. "
                         f"Fallback model ({fallback_model}) also returned no response."
@@ -739,8 +855,30 @@ def run_llm_loop(
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            _append_thinking_trace(
+                drive_logs,
+                source="task_loop",
+                step="llm_response",
+                task_id=task_id,
+                task_type=task_type or "task",
+                round_idx=round_idx,
+                details={
+                    "assistant_preview": (content or "")[:300],
+                    "tool_count": len(tool_calls),
+                    "tool_names": [tc.get("function", {}).get("name", "") for tc in tool_calls[:20]],
+                },
+            )
             # No tool calls — final response
             if not tool_calls:
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="final_response",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"response_preview": (content or "")[:400]},
+                )
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
             # Process tool calls
@@ -752,7 +890,16 @@ def run_llm_loop(
 
             error_count = _handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
-                messages, llm_trace, emit_progress
+                messages, llm_trace, emit_progress, round_idx, task_type or "task"
+            )
+            _append_thinking_trace(
+                drive_logs,
+                source="task_loop",
+                step="tool_batch_done",
+                task_id=task_id,
+                task_type=task_type or "task",
+                round_idx=round_idx,
+                details={"tool_count": len(tool_calls), "error_count": int(error_count)},
             )
 
             # --- Budget guard ---
@@ -763,6 +910,15 @@ def run_llm_loop(
                 task_id, event_queue, llm_trace, task_type
             )
             if budget_result is not None:
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="budget_guard_stop",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"remaining_budget_usd": budget_remaining_usd},
+                )
                 return budget_result
 
     finally:
@@ -929,6 +1085,10 @@ def _process_tool_results(
     messages: List[Dict[str, Any]],
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
+    drive_logs: pathlib.Path,
+    task_id: str,
+    round_idx: int,
+    task_type: str = "task",
 ) -> int:
     """
     Process tool execution results and append to messages/trace.
@@ -968,6 +1128,20 @@ def _process_tool_results(
             "result": truncate_for_log(exec_result["result"], 700),
             "is_error": is_error,
         })
+        _append_thinking_trace(
+            drive_logs,
+            source="task_loop",
+            step="tool_result",
+            task_id=task_id,
+            task_type=task_type,
+            round_idx=round_idx,
+            details={
+                "tool": fn_name,
+                "is_error": bool(is_error),
+                "args": _safe_args(exec_result["args_for_log"]),
+                "result_preview": truncate_for_log(str(exec_result["result"]), 700),
+            },
+        )
 
     return error_count
 

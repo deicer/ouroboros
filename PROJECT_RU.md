@@ -262,7 +262,7 @@ flowchart TB
 - `/data/memory/scratchpad.md`
 - `/data/memory/identity.md`
 - `/data/memory/USER_CONTEXT.md`
-- `/data/logs/*.jsonl` (chat/progress/tools/events/supervisor)
+- `/data/logs/*.jsonl` (chat/progress/tools/events/supervisor/thinking_trace)
 
 И умеет “сжато” пересказывать хвост логов, чтобы не заливать LLM гигабайтами истории.
 
@@ -353,6 +353,7 @@ Self-improvement в этой архитектуре выглядит так:
 - `/data/logs/tools.jsonl`: лог вызовов tools.
 - `/data/logs/events.jsonl`: usage, ошибки, метрики, сердцебиения.
 - `/data/logs/supervisor.jsonl`: события supervisor (рестарты, спавн воркеров, таймауты, и т.п.).
+- `/data/logs/thinking_trace.jsonl`: пошаговый trace решений (round start, ответ LLM, tool results, финальный шаг).
 - `/data/memory/scratchpad.md`: рабочая память.
 - `/data/memory/identity.md`: “кто я”.
 - `/data/memory/USER_CONTEXT.md`: информация о владельце (ограничение по размеру задаётся BIBLE).

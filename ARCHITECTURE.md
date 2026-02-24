@@ -1,4 +1,4 @@
-# Architecture
+# Архитектура
 
-This file describes the technical architecture of Ouroboros.
-Maintained by the agent. See BIBLE.md section 8.
+Этот файл описывает техническую архитектуру Ouroboros.
+Поддерживается агентом. Смотри BIBLE.md, раздел 8.
