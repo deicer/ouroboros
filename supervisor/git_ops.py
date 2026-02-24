@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -204,6 +205,81 @@ def _create_rescue_snapshot(branch: str, reason: str,
     return info
 
 
+def _is_valid_branch_name(branch: str) -> bool:
+    return bool(re.match(r"^[a-zA-Z0-9_./-]+$", str(branch or "").strip()))
+
+
+def _attempt_auto_preserve_unsynced(reason: str, repo_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort auto-preserve for unsynced state before destructive reset.
+
+    Strategy:
+    - If there are local modifications/untracked: stage + commit.
+    - Always try to push current branch (also flushes pre-existing unpushed commits).
+    - If commit was created but push failed, undo that commit to keep tree unchanged.
+
+    Controlled by env OUROBOROS_AUTO_PRESERVE_UNSYNCED (default: 1).
+    """
+    enabled = str(os.environ.get("OUROBOROS_AUTO_PRESERVE_UNSYNCED", "1")).strip().lower() not in {
+        "0", "false", "off", "no",
+    }
+    info: Dict[str, Any] = {
+        "enabled": enabled,
+        "attempted": False,
+        "ok": False,
+        "committed": False,
+        "pushed": False,
+        "branch": str(repo_state.get("current_branch") or ""),
+    }
+    if not enabled:
+        return info
+
+    dirty_lines = list(repo_state.get("dirty_lines") or [])
+    unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+    if not dirty_lines and not unpushed_lines:
+        info["ok"] = True
+        return info
+
+    branch = str(repo_state.get("current_branch") or "").strip()
+    if not branch or branch in {"HEAD", "unknown"} or not _is_valid_branch_name(branch):
+        info["error"] = f"invalid_current_branch:{branch or 'empty'}"
+        return info
+
+    info["attempted"] = True
+    commit_created = False
+    try:
+        subprocess.run(["git", "checkout", branch, "--"], cwd=str(REPO_DIR), check=True)
+
+        # Commit only when there are actual staged changes.
+        if dirty_lines:
+            subprocess.run(["git", "add", "-A"], cwd=str(REPO_DIR), check=True)
+            diff_cached = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"], cwd=str(REPO_DIR), check=False
+            )
+            if diff_cached.returncode == 1:
+                commit_msg = f"auto-preserve: unsynced changes before reset ({reason})"
+                subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(REPO_DIR), check=True)
+                commit_created = True
+                info["committed"] = True
+            elif diff_cached.returncode not in (0,):
+                raise RuntimeError(f"git diff --cached failed with rc={diff_cached.returncode}")
+
+        # Best effort rebase; push is strict.
+        subprocess.run(["git", "pull", "--rebase", "origin", branch], cwd=str(REPO_DIR), check=False)
+        subprocess.run(["git", "push", "origin", branch], cwd=str(REPO_DIR), check=True)
+        info["pushed"] = True
+        info["ok"] = True
+        return info
+    except Exception as e:
+        if commit_created:
+            try:
+                # Keep changes in working tree while dropping temporary local commit.
+                subprocess.run(["git", "reset", "HEAD~1"], cwd=str(REPO_DIR), check=False)
+            except Exception:
+                pass
+        info["error"] = repr(e)
+        return info
+
+
 # ---------------------------------------------------------------------------
 # Checkout + reset
 # ---------------------------------------------------------------------------
@@ -232,33 +308,82 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         dirty_lines = list(repo_state.get("dirty_lines") or [])
         unpushed_lines = list(repo_state.get("unpushed_lines") or [])
         if dirty_lines or unpushed_lines:
-            rescue_info: Dict[str, Any] = {}
+            # First try auto-preserve (commit/push) to avoid losing local edits on restart.
+            auto_preserve: Dict[str, Any] = {}
             if policy in {"rescue_and_block", "rescue_and_reset"}:
                 try:
-                    rescue_info = _create_rescue_snapshot(
-                        branch=branch, reason=reason, repo_state=repo_state)
+                    auto_preserve = _attempt_auto_preserve_unsynced(reason=reason, repo_state=repo_state)
                 except Exception as e:
-                    rescue_info = {"error": repr(e)}
-            bits: List[str] = []
-            if unpushed_lines:
-                bits.append(f"unpushed={len(unpushed_lines)}")
-            if dirty_lines:
-                bits.append(f"dirty={len(dirty_lines)}")
-            detail = ", ".join(bits) if bits else "unsynced"
-            rescue_suffix = ""
-            rescue_path = str(rescue_info.get("path") or "").strip()
-            if rescue_path:
-                rescue_suffix = f" Rescue saved to {rescue_path}."
-            elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
-                rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+                    auto_preserve = {"attempted": True, "ok": False, "error": repr(e)}
 
-            if policy in {"block", "rescue_and_block"}:
-                msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
                         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        "type": "reset_blocked_unsynced_state",
+                        "type": "auto_preserve_unsynced_attempt",
+                        "target_branch": branch,
+                        "reason": reason,
+                        "policy": policy,
+                        "before_dirty_count": len(dirty_lines),
+                        "before_unpushed_count": len(unpushed_lines),
+                        "result": auto_preserve,
+                    },
+                )
+
+                if auto_preserve.get("ok"):
+                    # Re-evaluate sync state after successful preserve.
+                    repo_state = _collect_repo_sync_state()
+                    dirty_lines = list(repo_state.get("dirty_lines") or [])
+                    unpushed_lines = list(repo_state.get("unpushed_lines") or [])
+
+            # Auto-preserve fully resolved unsynced state: continue with normal checkout flow.
+            if not (dirty_lines or unpushed_lines):
+                pass
+            else:
+                rescue_info: Dict[str, Any] = {}
+                if policy in {"rescue_and_block", "rescue_and_reset"}:
+                    try:
+                        rescue_info = _create_rescue_snapshot(
+                            branch=branch, reason=reason, repo_state=repo_state)
+                    except Exception as e:
+                        rescue_info = {"error": repr(e)}
+                bits: List[str] = []
+                if unpushed_lines:
+                    bits.append(f"unpushed={len(unpushed_lines)}")
+                if dirty_lines:
+                    bits.append(f"dirty={len(dirty_lines)}")
+                detail = ", ".join(bits) if bits else "unsynced"
+                rescue_suffix = ""
+                rescue_path = str(rescue_info.get("path") or "").strip()
+                if rescue_path:
+                    rescue_suffix = f" Rescue saved to {rescue_path}."
+                elif policy in {"rescue_and_block", "rescue_and_reset"} and rescue_info.get("error"):
+                    rescue_suffix = f" Rescue failed: {rescue_info.get('error')}."
+
+                if policy in {"block", "rescue_and_block"}:
+                    msg = f"Reset blocked ({detail}) to protect local changes.{rescue_suffix}"
+                    append_jsonl(
+                        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                        {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "reset_blocked_unsynced_state",
+                            "target_branch": branch, "reason": reason, "policy": policy,
+                            "current_branch": repo_state.get("current_branch"),
+                            "dirty_count": len(dirty_lines),
+                            "unpushed_count": len(unpushed_lines),
+                            "dirty_preview": dirty_lines[:20],
+                            "unpushed_preview": unpushed_lines[:20],
+                            "warnings": list(repo_state.get("warnings") or []),
+                            "rescue": rescue_info,
+                        },
+                    )
+                    return False, msg
+
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "reset_unsynced_rescued_then_reset",
                         "target_branch": branch, "reason": reason, "policy": policy,
                         "current_branch": repo_state.get("current_branch"),
                         "dirty_count": len(dirty_lines),
@@ -269,29 +394,12 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                         "rescue": rescue_info,
                     },
                 )
-                return False, msg
-
-            append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "reset_unsynced_rescued_then_reset",
-                    "target_branch": branch, "reason": reason, "policy": policy,
-                    "current_branch": repo_state.get("current_branch"),
-                    "dirty_count": len(dirty_lines),
-                    "unpushed_count": len(unpushed_lines),
-                    "dirty_preview": dirty_lines[:20],
-                    "unpushed_preview": unpushed_lines[:20],
-                    "warnings": list(repo_state.get("warnings") or []),
-                    "rescue": rescue_info,
-                },
-            )
-            # Policy allows destructive reset after rescue snapshot.
-            # Clean working tree up-front to avoid checkout failures caused by
-            # local modifications or untracked files "in the way".
-            if policy == "rescue_and_reset":
-                subprocess.run(["git", "reset", "--hard"], cwd=str(REPO_DIR), check=False)
-                subprocess.run(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=False)
+                # Policy allows destructive reset after rescue snapshot.
+                # Clean working tree up-front to avoid checkout failures caused by
+                # local modifications or untracked files "in the way".
+                if policy == "rescue_and_reset":
+                    subprocess.run(["git", "reset", "--hard"], cwd=str(REPO_DIR), check=False)
+                    subprocess.run(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=False)
 
     rc_verify = subprocess.run(
         ["git", "rev-parse", "--verify", f"origin/{branch}"],
