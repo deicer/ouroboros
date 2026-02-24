@@ -36,7 +36,12 @@ def _resolve_read_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
                 candidates.append((root_resolved / safe_relpath(app_rel)).resolve())
                 candidates.append((root_resolved / "ouroboros" / safe_relpath(app_rel)).resolve())
     else:
-        candidates.append((root_resolved / safe_relpath(p)).resolve())
+        rel = safe_relpath(p)
+        candidates.append((root_resolved / rel).resolve())
+        # Compatibility: many prompts refer to module files as if they lived in repo root
+        # (e.g. loop.py, tools/whisper.py), while actual layout is /ouroboros/<...>.
+        if not rel.startswith("ouroboros/"):
+            candidates.append((root_resolved / "ouroboros" / rel).resolve())
 
     # Prefer existing candidates inside root.
     for candidate in candidates:
