@@ -16,6 +16,32 @@ from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 log = logging.getLogger(__name__)
 
 
+def _resolve_read_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
+    """Resolve relative or absolute read path while enforcing root confinement."""
+    p = str(raw_path or "").strip()
+    if not p:
+        raise ValueError("path must not be empty")
+
+    root_resolved = root.resolve()
+    candidate = pathlib.Path(p).resolve() if pathlib.Path(p).is_absolute() else (root / safe_relpath(p)).resolve()
+
+    # Enforce candidate is inside root
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise ValueError(f"path outside allowed root: {p}")
+    return candidate
+
+
+def _apply_read_limit(text: str, limit: int | None) -> str:
+    """Apply optional character limit to read output for compatibility with legacy callers."""
+    try:
+        n = int(limit or 0)
+    except Exception:
+        n = 0
+    if n <= 0 or len(text) <= n:
+        return text
+    return text[:n] + f"\n...(truncated at {n} chars)..."
+
+
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
     if not target.exists():
@@ -35,16 +61,18 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
-def _repo_read(ctx: ToolContext, path: str) -> str:
-    return read_text(ctx.repo_path(path))
+def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
+    file_path = _resolve_read_path(ctx.repo_dir, path)
+    return _apply_read_limit(read_text(file_path), limit)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     return json.dumps(_list_dir(ctx.repo_dir, dir, max_entries), ensure_ascii=False, indent=2)
 
 
-def _drive_read(ctx: ToolContext, path: str) -> str:
-    return read_text(ctx.drive_path(path))
+def _drive_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
+    file_path = _resolve_read_path(ctx.drive_root, path)
+    return _apply_read_limit(read_text(file_path), limit)
 
 
 def _drive_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
@@ -328,8 +356,11 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("repo_read", {
             "name": "repo_read",
-            "description": "Read a UTF-8 text file from the GitHub repo (relative path).",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "description": "Read a UTF-8 text file from the GitHub repo (relative path; absolute /app/... also accepted).",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "description": "Optional max output chars for compatibility with legacy callers."},
+            }, "required": ["path"]},
         }, _repo_read),
         ToolEntry("repo_list", {
             "name": "repo_list",
@@ -341,8 +372,11 @@ def get_tools() -> List[ToolEntry]:
         }, _repo_list),
         ToolEntry("drive_read", {
             "name": "drive_read",
-            "description": "Read a UTF-8 text file from the data volume (relative to /data/).",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "description": "Read a UTF-8 text file from the data volume (relative to /data/; absolute /data/... also accepted).",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "limit": {"type": "integer", "description": "Optional max output chars for compatibility with legacy callers."},
+            }, "required": ["path"]},
         }, _drive_read),
         ToolEntry("drive_list", {
             "name": "drive_list",
