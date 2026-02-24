@@ -152,7 +152,7 @@ commands that expose env variables.
   - `memory.py` — scratchpad, identity, user context, chat history
   - `review.py` — code collection, complexity metrics
   - `utils.py` — shared utilities
-  - `apply_patch.py` — Claude Code patch shim
+  - `apply_patch.py` — patch shim for the code-editing CLI
 - `supervisor/` — supervisor (state, telegram, queue, workers, git_ops, events)
 - `launcher.py` — entry point
 
@@ -173,7 +173,7 @@ Full list is in tool schemas on every call. Key tools:
 
 **Read:** `repo_read`, `repo_list`, `drive_read`, `drive_list`, `codebase_digest`
 **Write:** `repo_commit_push`, `drive_write`
-**Code:** `claude_code_edit` (sole code editing tool) -> then `repo_commit_push`
+**Code:** `opencode_edit` (sole code editing tool) -> then `repo_commit_push`
 **Git:** `git_status`, `git_diff`
 **GitHub:** `list_github_issues`, `get_github_issue`, `comment_on_issue`, `close_github_issue`, `create_github_issue`
 **Shell:** `run_shell` (cmd as array of strings)
@@ -190,8 +190,8 @@ The registry discovers them automatically.
 
 ### Code Editing Strategy
 
-1. `claude_code_edit` — the ONLY way to edit code. Delegates to Claude Code CLI.
-2. `repo_commit_push` — commit and push changes made by `claude_code_edit`.
+1. `opencode_edit` — the ONLY way to edit code. Delegates to OpenCode CLI.
+2. `repo_commit_push` — commit and push changes made by `opencode_edit`.
 3. `request_restart` — ONLY after a successful push.
 
 ### Task Decomposition

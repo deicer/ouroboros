@@ -1,4 +1,4 @@
-"""Shell tools: run_shell, claude_code_edit."""
+"""Shell tools: run_shell, opencode_edit."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import pathlib
 import shlex
 import shutil
 import subprocess
-import tempfile
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -85,38 +84,26 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
-def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
-    """Run Claude CLI as ouroboros user with tempfile-based prompt."""
-    claude_bin = shutil.which("claude") or "claude"
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", prefix="claude_prompt_", delete=False
-        ) as f:
-            f.write(prompt)
-            tmp_path = f.name
-        os.chmod(tmp_path, 0o644)
+def _build_opencode_cmd(prompt: str) -> List[str]:
+    """Build OpenCode command for non-interactive code edits using default model settings."""
+    return [shutil.which("opencode") or "opencode", "run", prompt, "--format", "json"]
 
-        inner_cmd = (
-            f"{claude_bin}"
-            f" -p \"$(cat {tmp_path})\""
-            f" --output-format json"
-            f" --max-turns 12"
-            f" --tools Read,Write,Edit,Grep,Glob"
-            f" --permission-mode bypassPermissions"
-        )
-        cmd = ["su", "-s", "/bin/bash", "-c", inner_cmd, "ouroboros"]
 
-        return subprocess.run(
-            cmd, cwd=work_dir,
-            capture_output=True, text=True, timeout=300, env=env,
-        )
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+def _run_opencode_cli(
+    work_dir: str,
+    prompt: str,
+    env: dict,
+) -> subprocess.CompletedProcess:
+    """Run OpenCode in non-interactive mode and return subprocess result."""
+    cmd = _build_opencode_cmd(prompt=prompt)
+    return subprocess.run(
+        cmd,
+        cwd=work_dir,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
 
 
 def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
@@ -139,36 +126,84 @@ def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
             )
             if diff_res.returncode == 0 and diff_res.stdout.strip():
                 return (
-                    f"\n\n⚠️ UNCOMMITTED CHANGES detected after Claude Code edit:\n"
+                    f"\n\n⚠️ UNCOMMITTED CHANGES detected after OpenCode edit:\n"
                     f"{diff_res.stdout.strip()}\n"
                     f"Remember to run git_status and repo_commit_push!"
                 )
     except Exception as e:
-        log.debug("Failed to check git status after claude_code_edit: %s", e, exc_info=True)
+        log.debug("Failed to check git status after opencode_edit: %s", e, exc_info=True)
     return ""
 
 
-def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
-    """Parse JSON output and emit cost event, return result string."""
+def _parse_opencode_output(stdout: str) -> str:
+    """Parse OpenCode output (JSON or JSONL) and extract a readable text result."""
+    text = (stdout or "").strip()
+    if not text:
+        return ""
+
+    def _extract_text_from_obj(obj: Any) -> List[str]:
+        out: List[str] = []
+        if isinstance(obj, dict):
+            for key in ("text", "result", "output", "message", "content"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    out.append(val.strip())
+            if "delta" in obj and isinstance(obj["delta"], str) and obj["delta"].strip():
+                out.append(obj["delta"].strip())
+        elif isinstance(obj, list):
+            for item in obj:
+                out.extend(_extract_text_from_obj(item))
+        return out
+
+    # Try single JSON payload first
     try:
-        payload = json.loads(stdout)
-        out: Dict[str, Any] = {
-            "result": payload.get("result", ""),
-            "session_id": payload.get("session_id"),
-        }
-        if isinstance(payload.get("total_cost_usd"), (int, float)):
-            ctx.pending_events.append({
-                "type": "llm_usage",
-                "provider": "claude_code_cli",
-                "usage": {"cost": float(payload["total_cost_usd"])},
-                "source": "claude_code_edit",
-                "ts": utc_now_iso(),
-                "category": "task",
-            })
-        return json.dumps(out, ensure_ascii=False, indent=2)
+        payload = json.loads(text)
+        parts = _extract_text_from_obj(payload)
+        if parts:
+            return "\n".join(parts)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
     except Exception:
-        log.debug("Failed to parse claude_code_edit JSON output", exc_info=True)
-        return stdout
+        pass
+
+    # Fallback: parse newline-delimited JSON events
+    collected: List[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        collected.extend(_extract_text_from_obj(obj))
+    if collected:
+        return "\n".join(collected)
+    return text
+
+
+def _emit_opencode_usage_if_available(ctx: ToolContext, stdout: str) -> None:
+    """Emit llm_usage event when OpenCode returns numeric cost in JSON payload."""
+    try:
+        payload = json.loads((stdout or "").strip())
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    cost = payload.get("total_cost_usd")
+    if not isinstance(cost, (int, float)):
+        cost = payload.get("cost")
+    if not isinstance(cost, (int, float)):
+        return
+
+    ctx.pending_events.append({
+        "type": "llm_usage",
+        "provider": "opencode_cli",
+        "usage": {"cost": float(cost)},
+        "source": "opencode_edit",
+        "ts": utc_now_iso(),
+        "category": "task",
+    })
 
 
 def _run_pytest(repo_dir: pathlib.Path) -> str:
@@ -191,15 +226,13 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
     except subprocess.TimeoutExpired:
         return "\n\n⚠️ PYTEST TIMEOUT: exceeded 120s."
     except Exception as e:
-        log.debug("Failed to run pytest after claude_code_edit: %s", e, exc_info=True)
+        log.debug("Failed to run pytest after code edit: %s", e, exc_info=True)
         return ""
 
 
-def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Delegate code edits to Claude Code CLI."""
+def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
+    """Delegate code edits to OpenCode CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
-
-    api_key = os.environ["ANTHROPIC_API_KEY"]
 
     work_dir = str(ctx.repo_dir)
     if cwd and cwd.strip() not in ("", ".", "./"):
@@ -207,7 +240,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if candidate.exists():
             work_dir = str(candidate)
 
-    ctx.emit_progress_fn("Delegating to Claude Code CLI...")
+    ctx.emit_progress_fn("Delegating to OpenCode CLI...")
 
     lock = _acquire_git_lock(ctx)
     try:
@@ -223,32 +256,36 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         )
 
         env = os.environ.copy()
-        env["ANTHROPIC_API_KEY"] = api_key
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
-        res = _run_claude_cli(work_dir, full_prompt, env)
+        res = _run_opencode_cli(
+            work_dir=work_dir,
+            prompt=full_prompt,
+            env=env,
+        )
 
         stdout = (res.stdout or "").strip()
         stderr = (res.stderr or "").strip()
         if res.returncode != 0:
-            return f"⚠️ CLAUDE_CODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+            return f"⚠️ OPENCODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         if not stdout:
-            stdout = "OK: Claude Code completed with empty output."
+            stdout = "OK: OpenCode completed with empty output."
 
         warning = _check_uncommitted_changes(ctx.repo_dir)
         if warning:
             stdout += warning
+        _emit_opencode_usage_if_available(ctx, stdout)
 
     except subprocess.TimeoutExpired:
-        return "⚠️ CLAUDE_CODE_TIMEOUT: exceeded 300s."
+        return "⚠️ OPENCODE_TIMEOUT: exceeded 300s."
     except Exception as e:
-        return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
+        return f"⚠️ OPENCODE_FAILED: {type(e).__name__}: {e}"
     finally:
         _release_git_lock(lock)
 
-    result = _parse_claude_output(stdout, ctx)
+    result = _parse_opencode_output(stdout)
     result += _run_pytest(ctx.repo_dir)
     return result
 
@@ -263,12 +300,12 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True),
-        ToolEntry("claude_code_edit", {
-            "name": "claude_code_edit",
-            "description": "Delegate code edits to Claude Code CLI. The sole way to edit code. Follow with repo_commit_push.",
+        ToolEntry("opencode_edit", {
+            "name": "opencode_edit",
+            "description": "Delegate code edits to OpenCode CLI. The sole way to edit code. Follow with repo_commit_push.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True, timeout_sec=300),
+        }, _opencode_edit, is_code_tool=True, timeout_sec=300),
     ]

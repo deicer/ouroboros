@@ -49,7 +49,7 @@ Telegram --> launcher.py
                 core.py             -- file ops
                 git.py              -- git ops
                 github.py           -- GitHub Issues
-                shell.py            -- shell, Claude Code CLI
+                shell.py            -- shell, OpenCode CLI
                 search.py           -- web search
                 control.py          -- restart, evolve, review
                 browser.py          -- Playwright (stealth)
@@ -74,7 +74,8 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 | `TELEGRAM_BOT_TOKEN` | Yes | Create a bot via [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`), copy the token |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) -- Fine-grained token with **Contents: Read and write** on your fork |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
-| `ANTHROPIC_API_KEY` | Yes | [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) -- Claude Code CLI (sole code editing path) |
+| `OPENCODE_API_KEY` | No | Optional OpenCode auth key (depends on your OpenCode provider setup) |
+| `ANTHROPIC_API_KEY` | No | Optional provider key (for OpenCode/provider integrations) |
 | `TOTAL_BUDGET` | No | Fallback spending limit in USD if OpenRouter key has no limit set |
 
 ### Step 2: Fork the Repository
@@ -102,7 +103,7 @@ nano .env   # Fill in all required values (GITHUB_USER = your GitHub username)
 docker compose up -d --build
 ```
 
-First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI).
+First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI, OpenCode CLI).
 
 Check logs: `docker compose logs -f`
 
@@ -185,6 +186,8 @@ Full text: [BIBLE.md](BIBLE.md)
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | Enables the `web_search` tool |
+| `OPENCODE_API_KEY` | Optional auth key used by OpenCode CLI (if required by your setup) |
+| `ANTHROPIC_API_KEY` | Optional provider key for OpenCode/provider integrations |
 | `TOTAL_BUDGET` | Fallback spending limit in USD (only used if OpenRouter key has no limit set) |
 
 ### Optional Configuration (environment variables)
@@ -221,6 +224,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.1 -- OpenCode CLI for code editing
+- Added `opencode_edit` as the sole code-editing tool.
+- Docker image and E2E image install OpenCode CLI.
+- `.env` adds optional `OPENCODE_API_KEY`.
 
 ### v7.1.0 -- Claude Code CLI as sole code editing path
 - **ANTHROPIC_API_KEY is now required** -- Claude Code CLI is the only way the agent edits its own code.

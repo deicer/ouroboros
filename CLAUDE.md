@@ -48,7 +48,9 @@ Three-layer design:
 
 ## Required Environment Variables
 
-`OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`, `ANTHROPIC_API_KEY`
+`OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`
+
+Optional for code-editing provider setup: `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`
 
 ## Key Files
 
