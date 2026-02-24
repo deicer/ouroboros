@@ -21,6 +21,18 @@ def _env_model(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _ordered_unique(items: List[str]) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
@@ -79,6 +91,29 @@ def resolve_model_from_env(requested_model: str = "") -> str:
             ", ".join(allowed) or "<empty>",
         )
     return main
+
+
+def build_reasoning_config(model: str, reasoning_effort: str = "medium") -> Dict[str, Any]:
+    """Build OpenRouter reasoning config for the selected model."""
+    model_name = str(model or "").strip()
+    effort = normalize_reasoning_effort(reasoning_effort, default="medium")
+
+    # Grok 4.1 Fast: use the explicit reasoning.enabled toggle.
+    if model_name.startswith("x-ai/grok-4.1-fast"):
+        enabled_default = True
+        enabled = _env_bool("OUROBOROS_REASONING_ENABLED", default=enabled_default)
+        if effort == "none":
+            enabled = False
+        return {
+            "enabled": enabled,
+            "exclude": True,
+        }
+
+    # Generic OpenRouter-compatible reasoning control for other models.
+    return {
+        "effort": effort,
+        "exclude": True,
+    }
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
@@ -222,10 +257,9 @@ class LLMClient:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         model = resolve_model_from_env(model)
-        effort = normalize_reasoning_effort(reasoning_effort)
 
         extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
+            "reasoning": build_reasoning_config(model, reasoning_effort=reasoning_effort),
         }
 
         # Pin Anthropic models to Anthropic provider for prompt caching
