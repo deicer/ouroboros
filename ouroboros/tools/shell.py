@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -155,6 +156,72 @@ def _opencode_fallback_models() -> List[str]:
     return list(_OPENCODE_FALLBACK_MODELS)
 
 
+def _opencode_prompt_limits() -> tuple[int, int]:
+    max_chars = int(os.environ.get("OUROBOROS_OPENCODE_MAX_PROMPT_CHARS", "3500") or "3500")
+    max_lines = int(os.environ.get("OUROBOROS_OPENCODE_MAX_PROMPT_LINES", "120") or "120")
+    return max(500, max_chars), max(20, max_lines)
+
+
+def _opencode_prompt_too_large(prompt: str) -> tuple[bool, int, int, int, int]:
+    char_count = len(prompt)
+    line_count = prompt.count("\n") + 1
+    max_chars, max_lines = _opencode_prompt_limits()
+    too_large = char_count > max_chars or line_count > max_lines
+    return too_large, char_count, line_count, max_chars, max_lines
+
+
+def _extract_atomic_steps(prompt: str, max_items: int = 6) -> List[str]:
+    # Try to keep only explicit checklist-style lines from long prompts.
+    steps: List[str] = []
+    for raw_line in prompt.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("-", "•", "*")):
+            cleaned = re.sub(r"^[-•*]\s*", "", line).strip()
+        elif re.match(r"^\d+[.)]\s+", line):
+            cleaned = re.sub(r"^\d+[.)]\s*", "", line).strip()
+        else:
+            continue
+        if cleaned:
+            steps.append(cleaned)
+        if len(steps) >= max_items:
+            return steps[:max_items]
+
+    # Fallback when there are no bullet points.
+    if not steps:
+        for sentence in re.split(r"[.!?]\s+", prompt):
+            s = sentence.strip()
+            if len(s) >= 24:
+                steps.append(s)
+            if len(steps) >= max_items:
+                break
+    return steps[:max_items]
+
+
+def _format_prompt_too_large_message(prompt: str) -> str:
+    too_large, char_count, line_count, max_chars, max_lines = _opencode_prompt_too_large(prompt)
+    if not too_large:
+        return ""
+    steps = _extract_atomic_steps(prompt)
+    lines = [
+        (
+            "⚠️ OPENCODE_PROMPT_TOO_LARGE: "
+            f"{char_count} chars, {line_count} lines "
+            f"(limits: {max_chars} chars, {max_lines} lines)."
+        ),
+        "Split into smaller calls (1 file or 1 change per call) to avoid provider timeouts/internal errors.",
+    ]
+    if steps:
+        lines.append("Suggested atomic steps:")
+        for idx, step in enumerate(steps, start=1):
+            lines.append(f"{idx}. {truncate_for_log(step, 220)}")
+    lines.append(
+        "Config: OUROBOROS_OPENCODE_MAX_PROMPT_CHARS, OUROBOROS_OPENCODE_MAX_PROMPT_LINES."
+    )
+    return "\n".join(lines)
+
+
 def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
     """Check git status after edit, return warning string or empty string."""
     try:
@@ -283,6 +350,9 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to OpenCode CLI."""
     if not isinstance(prompt, str) or not prompt.strip():
         return "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+    too_large_msg = _format_prompt_too_large_message(prompt)
+    if too_large_msg:
+        return too_large_msg
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     work_dir = str(ctx.repo_dir)

@@ -32,6 +32,23 @@ def test_opencode_no_changes_detected():
     assert _opencode_no_changes_detected("Updated 1 file", "") is False
 
 
+def test_opencode_prompt_too_large_and_step_extraction(monkeypatch):
+    from ouroboros.tools.shell import _extract_atomic_steps, _opencode_prompt_too_large
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_PROMPT_CHARS", "500")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_PROMPT_LINES", "20")
+
+    prompt = "\n".join([f"{i}. Step {i} for refactor" for i in range(1, 25)])
+    too_large, char_count, line_count, max_chars, max_lines = _opencode_prompt_too_large(prompt)
+    assert too_large is True
+    assert line_count > max_lines
+
+    steps = _extract_atomic_steps(prompt)
+    assert steps[0] == "Step 1 for refactor"
+    assert steps[1] == "Step 2 for refactor"
+    assert steps[2] == "Step 3 for refactor"
+
+
 def test_parse_opencode_output_dict_payload():
     from ouroboros.tools.shell import _parse_opencode_output
 
@@ -101,3 +118,23 @@ def test_opencode_edit_empty_prompt_validation(tmp_path):
 
     result = _opencode_edit(ctx, None)  # type: ignore[arg-type]
     assert result == "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+
+
+def test_opencode_edit_large_prompt_fast_fails(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_PROMPT_CHARS", "500")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_PROMPT_LINES", "20")
+
+    prompt = "\n".join([f"{i}. Refactor block {i}" for i in range(1, 30)])
+    result = _opencode_edit(ctx, prompt)
+    assert result.startswith("⚠️ OPENCODE_PROMPT_TOO_LARGE:")
+    assert "Suggested atomic steps:" in result
+    assert "1. Refactor block 1" in result
