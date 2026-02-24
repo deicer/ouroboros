@@ -100,7 +100,8 @@ def _release_git_lock(lock_path: pathlib.Path) -> None:
 
 # --- Pre-push test gate ---
 
-MAX_TEST_OUTPUT = 8000
+MAX_TEST_OUTPUT = 12000
+
 
 def _run_pre_push_tests(ctx: ToolContext) -> Optional[str]:
     """Run pre-push tests if enabled. Returns None if tests pass, error string if they fail."""
