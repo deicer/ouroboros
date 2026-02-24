@@ -19,8 +19,17 @@ def test_build_opencode_cmd_with_model():
     from ouroboros.tools.shell import _build_opencode_cmd
 
     cmd = _build_opencode_cmd(prompt="edit file", model="opencode/minimax-m2.5-free")
-    assert "-m" in cmd
-    assert "opencode/minimax-m2.5-free" in cmd
+    assert cmd[2] == "-m"
+    assert cmd[3] == "opencode/minimax-m2.5-free"
+    assert cmd[4] == "edit file"
+
+
+def test_opencode_no_changes_detected():
+    from ouroboros.tools.shell import _opencode_no_changes_detected
+
+    assert _opencode_no_changes_detected("No changes to apply") is True
+    assert _opencode_no_changes_detected("", "Result: no changes to apply") is True
+    assert _opencode_no_changes_detected("Updated 1 file", "") is False
 
 
 def test_parse_opencode_output_dict_payload():
@@ -68,3 +77,27 @@ def test_copilot_reauth_detection():
         stderr="https://api.githubcopilot.com/chat/completions",
     ) is True
     assert _is_copilot_reauth_error(stdout="other error", stderr="") is False
+
+
+def test_opencode_edit_empty_prompt_validation(tmp_path):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+
+    result = _opencode_edit(ctx, "")
+    assert result == "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+
+    result = _opencode_edit(ctx, "   ")
+    assert result == "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+
+    result = _opencode_edit(ctx, 123)  # type: ignore[arg-type]
+    assert result == "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+
+    result = _opencode_edit(ctx, None)  # type: ignore[arg-type]
+    assert result == "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."

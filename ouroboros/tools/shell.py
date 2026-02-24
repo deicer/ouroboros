@@ -91,9 +91,10 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
 
 def _build_opencode_cmd(prompt: str, model: str = "") -> List[str]:
     """Build OpenCode command for non-interactive code edits."""
-    cmd = [shutil.which("opencode") or "opencode", "run", prompt, "--format", "json"]
+    cmd = [shutil.which("opencode") or "opencode", "run"]
     if model and str(model).strip():
         cmd.extend(["-m", str(model).strip()])
+    cmd.extend([prompt, "--format", "json"])
     return cmd
 
 
@@ -131,6 +132,11 @@ def _opencode_has_error_payload(stdout: str) -> bool:
         if isinstance(obj, dict) and str(obj.get("type", "")).strip().lower() == "error":
             return True
     return False
+
+
+def _opencode_no_changes_detected(stdout: str, stderr: str = "") -> bool:
+    txt = f"{stdout or ''}\n{stderr or ''}".lower()
+    return "no changes to apply" in txt
 
 
 def _is_copilot_reauth_error(stdout: str, stderr: str) -> bool:
@@ -275,6 +281,8 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
 
 def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to OpenCode CLI."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        return "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     work_dir = str(ctx.repo_dir)
@@ -303,38 +311,78 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
-        res = _run_opencode_cli(
-            work_dir=work_dir,
-            prompt=full_prompt,
-            env=env,
-        )
+        max_retries = max(1, int(os.environ.get("OUROBOROS_OPENCODE_MAX_RETRIES", "2") or "2"))
+        model_attempts: List[str] = [""] + _opencode_fallback_models()
+        res = None
+        stdout = ""
+        stderr = ""
+        failed = True
+        attempt_notes: List[str] = []
 
-        stdout = (res.stdout or "").strip()
-        stderr = (res.stderr or "").strip()
-        has_error_payload = _opencode_has_error_payload(stdout)
-        failed = (res.returncode != 0) or has_error_payload
-        if failed and _is_copilot_reauth_error(stdout, stderr):
-            fallback_res = None
-            for model in _opencode_fallback_models():
-                ctx.emit_progress_fn(f"OpenCode auth/provider issue detected, retrying with {model}...")
-                fallback_res = _run_opencode_cli(
-                    work_dir=work_dir,
-                    prompt=full_prompt,
-                    env=env,
-                    model=model,
-                )
-                fallback_stdout = (fallback_res.stdout or "").strip()
-                fallback_stderr = (fallback_res.stderr or "").strip()
-                fallback_failed = (
-                    fallback_res.returncode != 0
-                    or _opencode_has_error_payload(fallback_stdout)
-                )
-                if not fallback_failed:
-                    res = fallback_res
-                    stdout = fallback_stdout
-                    stderr = fallback_stderr
-                    failed = False
-                    break
+        for model in model_attempts:
+            model_label = model or "default"
+            for attempt in range(1, max_retries + 1):
+                if model:
+                    ctx.emit_progress_fn(
+                        f"OpenCode retry with {model_label} (attempt {attempt}/{max_retries})..."
+                    )
+                try:
+                    cur_res = _run_opencode_cli(
+                        work_dir=work_dir,
+                        prompt=full_prompt,
+                        env=env,
+                        model=model,
+                    )
+                    cur_stdout = (cur_res.stdout or "").strip()
+                    cur_stderr = (cur_res.stderr or "").strip()
+                    cur_failed = (
+                        cur_res.returncode != 0
+                        or _opencode_has_error_payload(cur_stdout)
+                    )
+                    if not cur_failed:
+                        res = cur_res
+                        stdout = cur_stdout
+                        stderr = cur_stderr
+                        failed = False
+                        break
+
+                    if _opencode_no_changes_detected(cur_stdout, cur_stderr):
+                        return "ℹ️ OpenCode: no changes to apply (target state already reached)."
+
+                    reason = "copilot_auth" if _is_copilot_reauth_error(cur_stdout, cur_stderr) else "tool_or_provider_error"
+                    attempt_notes.append(
+                        f"{model_label}#{attempt}:{reason}:exit={cur_res.returncode}"
+                    )
+                    stdout = cur_stdout
+                    stderr = cur_stderr
+                    res = cur_res
+                except subprocess.TimeoutExpired as te:
+                    timeout_stdout = (te.stdout or "").strip() if isinstance(te.stdout, str) else ""
+                    timeout_stderr = (te.stderr or "").strip() if isinstance(te.stderr, str) else ""
+                    if _opencode_no_changes_detected(timeout_stdout, timeout_stderr):
+                        return "ℹ️ OpenCode: no changes to apply (target state already reached)."
+                    attempt_notes.append(f"{model_label}#{attempt}:timeout")
+                    stdout = timeout_stdout
+                    stderr = timeout_stderr
+                    res = subprocess.CompletedProcess(
+                        args=[],
+                        returncode=124,
+                        stdout=timeout_stdout,
+                        stderr=timeout_stderr,
+                    )
+                except Exception as e:
+                    attempt_notes.append(f"{model_label}#{attempt}:{type(e).__name__}")
+                    stdout = ""
+                    stderr = str(e)
+                    res = subprocess.CompletedProcess(
+                        args=[],
+                        returncode=125,
+                        stdout="",
+                        stderr=str(e),
+                    )
+
+            if not failed:
+                break
 
         if failed:
             help_text = (
@@ -343,8 +391,10 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                 "2) Verify key is present in container: OPENCODE_API_KEY.\n"
                 "3) Test manually: opencode run -m opencode/minimax-m2.5-free \"Reply with exactly: OK\" --format json\n"
             )
+            attempts_text = ", ".join(attempt_notes[-10:]) if attempt_notes else "n/a"
             return (
-                f"⚠️ OPENCODE_ERROR: exit={res.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+                f"⚠️ OPENCODE_ERROR: exit={res.returncode if res is not None else 'n/a'}\n"
+                f"Attempts: {attempts_text}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
                 f"{help_text}"
             )
         if not stdout:
@@ -355,8 +405,6 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             stdout += warning
         _emit_opencode_usage_if_available(ctx, stdout)
 
-    except subprocess.TimeoutExpired:
-        return "⚠️ OPENCODE_TIMEOUT: exceeded 300s."
     except Exception as e:
         return f"⚠️ OPENCODE_FAILED: {type(e).__name__}: {e}"
     finally:
