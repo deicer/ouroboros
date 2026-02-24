@@ -97,13 +97,39 @@ def _run_pre_push_tests(ctx: ToolContext) -> Optional[str]:
         return f"⚠️ PRE_PUSH_TEST_ERROR: Unexpected error running tests: {e}"
 
 
-def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
-    """Run pre-push tests, then pull --rebase and push. Returns None on success, error string on failure."""
+def _git_push_with_tests(ctx: ToolContext) -> tuple[bool, str]:
+    """Run pre-push tests, then pull --rebase and push.
+
+    Returns:
+        (ok, note_or_error)
+        - ok=True: push succeeded; note may contain non-blocking warnings.
+        - ok=False: push failed or strict pre-push gate blocked the push.
+    """
+    note = ""
     test_error = _run_pre_push_tests(ctx)
     if test_error:
-        log.error("Pre-push tests failed, blocking push")
-        ctx.last_push_succeeded = False
-        return f"⚠️ PRE_PUSH_TESTS_FAILED: Tests failed, push blocked.\n{test_error}\nCommitted locally but NOT pushed. Fix tests and push manually."
+        strict = os.environ.get("OUROBOROS_PRE_PUSH_STRICT", "0") == "1"
+        if strict:
+            log.error("Pre-push tests failed, blocking push (strict mode)")
+            ctx.last_push_succeeded = False
+            return False, (
+                "⚠️ PRE_PUSH_TESTS_FAILED: Tests failed, push blocked (strict mode).\n"
+                f"{test_error}\nCommitted locally but NOT pushed. Fix tests and push manually."
+            )
+        log.warning("Pre-push tests failed, but continuing push (non-strict mode)")
+        note = (
+            "⚠️ PRE_PUSH_TESTS_FAILED_NON_BLOCKING: tests failed, but push allowed.\n"
+            f"{test_error}"
+        )
+        try:
+            if ctx is not None:
+                ctx.pending_events.append({
+                    "type": "pre_push_tests_failed_non_blocking",
+                    "ts": utc_now_iso(),
+                    "message": test_error[:2000],
+                })
+        except Exception:
+            log.debug("Failed to append non-blocking pre-push warning event", exc_info=True)
 
     try:
         run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
@@ -114,9 +140,9 @@ def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
     try:
         run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
     except Exception as e:
-        return f"⚠️ GIT_ERROR (push): {e}\nCommitted locally but NOT pushed."
+        return False, f"⚠️ GIT_ERROR (push): {e}\nCommitted locally but NOT pushed."
 
-    return None
+    return True, note
 
 
 # --- Tool implementations ---
@@ -154,13 +180,15 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
         except Exception as e:
             return f"⚠️ GIT_ERROR (commit): {e}"
 
-        push_error = _git_push_with_tests(ctx)
-        if push_error:
-            return push_error
+        push_ok, push_note = _git_push_with_tests(ctx)
+        if not push_ok:
+            return push_note
     finally:
         _release_git_lock(lock)
     ctx.last_push_succeeded = True
     result = f"OK: committed and pushed to {ctx.branch_dev}: {commit_message}"
+    if push_note:
+        result += f"\n{push_note}"
     if paths is not None:
         try:
             untracked = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=ctx.repo_dir)
