@@ -29,3 +29,13 @@ Thumbs.db
 # Release artifacts (not tracked)
 .create_release.py
 .release_notes.md
+
+# Runtime container data (bind-mounted /data)
+data/archive/
+data/data/
+data/index/
+data/locks/
+data/logs/
+data/memory/
+data/state/
+data/task_results/

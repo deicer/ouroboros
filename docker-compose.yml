@@ -6,6 +6,4 @@ services:
     mem_limit: 2g
     env_file: .env
     volumes:
-      - ouroboros-data:/data
-volumes:
-  ouroboros-data:
+      - ./data:/data
