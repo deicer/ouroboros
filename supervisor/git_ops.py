@@ -286,6 +286,12 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
                     "rescue": rescue_info,
                 },
             )
+            # Policy allows destructive reset after rescue snapshot.
+            # Clean working tree up-front to avoid checkout failures caused by
+            # local modifications or untracked files "in the way".
+            if policy == "rescue_and_reset":
+                subprocess.run(["git", "reset", "--hard"], cwd=str(REPO_DIR), check=False)
+                subprocess.run(["git", "clean", "-fd"], cwd=str(REPO_DIR), check=False)
 
     rc_verify = subprocess.run(
         ["git", "rev-parse", "--verify", f"origin/{branch}"],
@@ -309,12 +315,18 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
             )
             return False, msg
         log.info("Branch %s not on remote — creating from origin/main", branch)
-        subprocess.run(["git", "checkout", "-b", branch, "origin/main", "--"],
+        checkout_create_cmd = ["git", "checkout", "-b", branch, "origin/main", "--"]
+        if policy == "rescue_and_reset":
+            checkout_create_cmd = ["git", "checkout", "-f", "-b", branch, "origin/main", "--"]
+        subprocess.run(checkout_create_cmd,
                         cwd=str(REPO_DIR), check=True)
         subprocess.run(["git", "push", "-u", "origin", branch],
                         cwd=str(REPO_DIR), check=True)
     else:
-        subprocess.run(["git", "checkout", branch, "--"], cwd=str(REPO_DIR), check=True)
+        checkout_cmd = ["git", "checkout", branch, "--"]
+        if policy == "rescue_and_reset":
+            checkout_cmd = ["git", "checkout", "-f", branch, "--"]
+        subprocess.run(checkout_cmd, cwd=str(REPO_DIR), check=True)
         subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
     # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
     for p in REPO_DIR.rglob("__pycache__"):
