@@ -1,5 +1,7 @@
+import os
 import pathlib
 import tempfile
+import time
 
 import pytest
 
@@ -47,3 +49,25 @@ def test_acquire_git_lock_waits_for_live_owner_and_times_out(monkeypatch):
         monkeypatch.setattr("ouroboros.tools.git._pid_is_alive", lambda pid: True)
         with pytest.raises(TimeoutError):
             _acquire_git_lock(ctx, timeout_sec=1)
+
+
+def test_acquire_git_lock_reclaims_legacy_lock_without_pid(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        repo = pathlib.Path(td) / "repo"
+        drive = pathlib.Path(td) / "data"
+        repo.mkdir(parents=True, exist_ok=True)
+        (drive / "locks").mkdir(parents=True, exist_ok=True)
+        ctx = _mk_ctx(repo, drive)
+
+        lock_path = drive / "locks" / "git.lock"
+        lock_path.write_text("locked_at=2026-01-01T00:00:00Z\n", encoding="utf-8")
+        old = time.time() - 300
+        os.utime(lock_path, (old, old))
+
+        monkeypatch.setenv("OUROBOROS_GIT_LOCK_LEGACY_STALE_SEC", "120")
+        acquired = _acquire_git_lock(ctx, timeout_sec=2)
+        try:
+            content = acquired.read_text(encoding="utf-8")
+            assert "pid=" in content
+        finally:
+            _release_git_lock(acquired)

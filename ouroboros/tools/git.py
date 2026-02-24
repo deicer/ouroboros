@@ -51,6 +51,7 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "git.lock"
     stale_sec = 600
+    legacy_stale_sec = int(os.environ.get("OUROBOROS_GIT_LOCK_LEGACY_STALE_SEC", "120") or "120")
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if lock_path.exists():
@@ -63,7 +64,12 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
                 if pid and not _pid_is_alive(pid):
                     lock_path.unlink()
                     continue
-                # Legacy lock format (no pid) falls back to age-based stale cleanup.
+                # Legacy lock format (no pid) uses a shorter stale timeout to recover
+                # from pre-upgrade stale locks that cannot be validated via PID.
+                if (not pid) and age > legacy_stale_sec:
+                    lock_path.unlink()
+                    continue
+                # PID-aware locks fall back to conservative age-based stale cleanup.
                 if age > stale_sec:
                     lock_path.unlink()
                     continue
