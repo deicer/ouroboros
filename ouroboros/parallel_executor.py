@@ -9,13 +9,14 @@ Returns: Number of errors encountered
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import logging
+from ouroboros.timeout_handler import _execute_with_timeout
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ def _batch_error_signature(llm_trace: Dict[str, Any], tool_count: int) -> Option
     error_sigs = []
     for tc in tool_calls:
         if tc.get("is_error"):
-            error_sigs.append(f"{tc.get(\"fn_name\")}: {tc.get(\"result\")[:100]}")
+            error_sigs.append(f"{tc.get('fn_name')}: {tc.get('result')[:100]}")
     return "; ".join(error_sigs) if error_sigs else None
 
 
@@ -100,7 +101,7 @@ def _batch_tool_signature(llm_trace: Dict[str, Any], tool_count: int) -> Optiona
     sigs = []
     for tc in tool_calls:
         args = json.loads(tc.get("args_for_log", "{}") or "{}")
-        sig = f"{tc.get(\"fn_name\")}({len(args)})"
+        sig = f"{tc.get('fn_name')}({len(args)})"
         sigs.append(sig)
     return "; ".join(sigs)
 
@@ -144,7 +145,7 @@ def _process_tool_results(
         llm_trace["tool_calls"].append(result)
         messages.append({
             "role": "tool",
-            "content": f"[{result[\"fn_name\"]}] {result[\"result\"]}",
+            "content": f"[{result['fn_name']}] {result['result']}",
             "tool_call_id": result["tool_call_id"],
             "tool_name": result["fn_name"],
         })
@@ -293,7 +294,6 @@ def _call_llm_with_retry(
         (None, 0.0) on failure after max_retries
     """
     msg = None
-    last_error: Optional[Exception] = None
 
     for attempt in range(max_retries):
         try:
@@ -364,7 +364,6 @@ def _call_llm_with_retry(
             return msg, cost
 
         except Exception as e:
-            last_error = e
             from ouroboros.utils import append_jsonl
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": os.environ.get("NOW_ISO"), "type": "llm_api_error",
