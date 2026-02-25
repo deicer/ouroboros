@@ -265,3 +265,48 @@ def test_opencode_edit_logs_failure_stats(tmp_path, monkeypatch):
     assert last["ok"] is False
     assert last["failure_reason"] == "opencode_failed"
     assert int(last["attempts_total"]) >= 1
+
+
+def test_ensure_opencode_cli_disabled_auto_install(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _ensure_opencode_cli
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_AUTO_INSTALL", "0")
+    monkeypatch.setattr("ouroboros.tools.shell.shutil.which", lambda *args, **kwargs: None)
+
+    ok, info = _ensure_opencode_cli(ctx, work_dir=str(repo_dir), env={"PATH": "/usr/bin"})
+    assert ok is False
+    assert "auto-install is disabled" in info
+
+
+def test_opencode_edit_fails_fast_when_bootstrap_unavailable(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_AUTO_INSTALL", "0")
+    monkeypatch.setattr("ouroboros.tools.shell.shutil.which", lambda *args, **kwargs: None)
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+    result = _opencode_edit(ctx, "Refactor agent.py")
+
+    assert result.startswith("⚠️ OPENCODE_BOOTSTRAP_FAILED:")
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["ok"] is False
+    assert last["failure_reason"] == "opencode_bootstrap_failed"

@@ -162,6 +162,8 @@ docker compose exec -T ouroboros opencode models opencode
 docker compose exec -T ouroboros opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json
 ```
 
+`opencode_edit` сначала пытается восстановить окружение сам: если бинарь `opencode` отсутствует, агент запускает автоустановку и проверяет `opencode --version`.
+
 If default `opencode run ...` returns Copilot 403, ensure `/app/opencode.json` exists and points to provider `opencode`.
 
 ---
@@ -252,6 +254,10 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC` | `1800` | Max age (seconds) for `openrouter_limit_remaining` before forced OpenRouter refresh |
+| `OUROBOROS_OPENCODE_AUTO_INSTALL` | `true` | Auto-install OpenCode CLI at runtime when binary is missing |
+| `OUROBOROS_OPENCODE_INSTALL_CMD` | `curl -fsSL https://opencode.ai/install \| bash` | Custom bootstrap command for OpenCode CLI |
+| `OUROBOROS_RUNTIME_EXTRA_PIP` | *(empty)* | Optional pip packages to auto-install on each `safe_restart` (comma-separated) |
+| `OUROBOROS_RUNTIME_EXTRA_PIP_STRICT` | `false` | If `true`, restart fails when optional package install fails |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
 | `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
 | `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |

@@ -151,6 +151,141 @@ def _run_opencode_cli(
     )
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _append_tool_event(ctx: ToolContext, payload: Dict[str, Any]) -> None:
+    try:
+        append_jsonl(
+            ctx.drive_logs() / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "opencode_bootstrap",
+                **payload,
+            },
+        )
+    except Exception:
+        log.debug("Failed to append opencode bootstrap event", exc_info=True)
+
+
+def _prepend_path_entries(path_value: str, entries: List[str]) -> str:
+    ordered: List[str] = []
+    seen = set()
+    for item in entries + (path_value or "").split(":"):
+        s = str(item or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        ordered.append(s)
+    return ":".join(ordered)
+
+
+def _ensure_opencode_cli(
+    ctx: ToolContext,
+    *,
+    work_dir: str,
+    env: Dict[str, str],
+    timeout_sec: int = 150,
+) -> tuple[bool, str]:
+    """Best-effort bootstrap for OpenCode CLI inside runtime container."""
+    opencode_path = shutil.which("opencode", path=env.get("PATH", ""))
+    if opencode_path:
+        return True, opencode_path
+
+    if not _env_bool("OUROBOROS_OPENCODE_AUTO_INSTALL", default=True):
+        msg = "opencode not found in PATH and auto-install is disabled (OUROBOROS_OPENCODE_AUTO_INSTALL=0)."
+        _append_tool_event(ctx, {"ok": False, "stage": "disabled", "error": msg})
+        return False, msg
+
+    install_cmd = (
+        os.environ.get("OUROBOROS_OPENCODE_INSTALL_CMD", "").strip()
+        or "curl -fsSL https://opencode.ai/install | bash"
+    )
+    ctx.emit_progress_fn("OpenCode CLI не найден, пробую автоустановку...")
+    try:
+        install_res = subprocess.run(
+            ["bash", "-lc", install_cmd],
+            cwd=work_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=max(30, int(timeout_sec)),
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"OpenCode install timed out after {timeout_sec}s."
+        _append_tool_event(ctx, {"ok": False, "stage": "install", "error": msg})
+        return False, msg
+    except Exception as e:
+        msg = f"OpenCode install failed: {type(e).__name__}: {e}"
+        _append_tool_event(ctx, {"ok": False, "stage": "install", "error": msg})
+        return False, msg
+
+    if install_res.returncode != 0:
+        stdout = truncate_for_log((install_res.stdout or "").strip(), 1200)
+        stderr = truncate_for_log((install_res.stderr or "").strip(), 1200)
+        msg = (
+            f"OpenCode install exited {install_res.returncode}. "
+            f"stdout={stdout or '-'} stderr={stderr or '-'}"
+        )
+        _append_tool_event(
+            ctx,
+            {
+                "ok": False,
+                "stage": "install",
+                "error": msg,
+                "returncode": int(install_res.returncode),
+            },
+        )
+        return False, msg
+
+    opencode_path = shutil.which("opencode", path=env.get("PATH", ""))
+    if not opencode_path:
+        msg = "OpenCode install completed but binary still missing in PATH."
+        _append_tool_event(ctx, {"ok": False, "stage": "which", "error": msg})
+        return False, msg
+
+    try:
+        version_res = subprocess.run(
+            [opencode_path, "--version"],
+            cwd=work_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if version_res.returncode != 0:
+            msg = (
+                f"OpenCode installed at {opencode_path}, "
+                f"but --version failed (exit={version_res.returncode})."
+            )
+            _append_tool_event(
+                ctx,
+                {
+                    "ok": False,
+                    "stage": "verify",
+                    "error": msg,
+                    "returncode": int(version_res.returncode),
+                },
+            )
+            return False, msg
+    except Exception as e:
+        msg = f"OpenCode verify failed: {type(e).__name__}: {e}"
+        _append_tool_event(ctx, {"ok": False, "stage": "verify", "error": msg})
+        return False, msg
+
+    _append_tool_event(ctx, {"ok": True, "stage": "ready", "path": opencode_path})
+    return True, opencode_path
+
+
 def _opencode_has_error_payload(stdout: str) -> bool:
     """Return True when OpenCode returned an explicit JSON error payload."""
     text = (stdout or "").strip()
@@ -663,8 +798,25 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
         env = os.environ.copy()
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
-        if local_bin not in env.get("PATH", ""):
-            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+        opencode_home_bin = str(pathlib.Path.home() / ".opencode" / "bin")
+        env["PATH"] = _prepend_path_entries(
+            env.get("PATH", ""),
+            [local_bin, opencode_home_bin, "/usr/local/bin"],
+        )
+        opencode_ready, opencode_info = _ensure_opencode_cli(ctx, work_dir=work_dir, env=env)
+        if not opencode_ready:
+            return _finish(
+                f"⚠️ OPENCODE_BOOTSTRAP_FAILED: {opencode_info}",
+                ok=False,
+                route=route,
+                fallback_used=fallback_used,
+                attempts_total=0,
+                models_tried=[],
+                budget_exhausted=False,
+                failure_reason="opencode_bootstrap_failed",
+                fast_edit_reason=fast_edit_reason,
+            )
+        _append_tool_event(ctx, {"ok": True, "stage": "resolved", "path": opencode_info})
 
         max_retries = max(1, int(os.environ.get("OUROBOROS_OPENCODE_MAX_RETRIES", "1") or "1"))
         # Keep this below tool timeout_sec (300) to guarantee lock release in finally.

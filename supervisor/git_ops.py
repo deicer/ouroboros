@@ -468,14 +468,6 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         source = "fallback:minimal"
     try:
         subprocess.run(cmd, cwd=str(REPO_DIR), check=True)
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "deps_sync_ok", "reason": reason, "source": source,
-            },
-        )
-        return True, source
     except Exception as e:
         msg = repr(e)
         append_jsonl(
@@ -486,6 +478,61 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
             },
         )
         return False, msg
+
+    extras_raw = os.environ.get("OUROBOROS_RUNTIME_EXTRA_PIP", "") or ""
+    extras = [pkg.strip() for pkg in re.split(r"[,\n;]+", extras_raw) if pkg.strip()]
+    strict_extras = _env_bool("OUROBOROS_RUNTIME_EXTRA_PIP_STRICT", default=False)
+    extras_errors: List[Dict[str, str]] = []
+    extras_installed: List[str] = []
+
+    for pkg in extras:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", pkg],
+                cwd=str(REPO_DIR),
+                check=True,
+            )
+            extras_installed.append(pkg)
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "deps_sync_extra_ok",
+                    "reason": reason,
+                    "package": pkg,
+                },
+            )
+        except Exception as e:
+            err = repr(e)
+            extras_errors.append({"package": pkg, "error": err})
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "deps_sync_extra_error",
+                    "reason": reason,
+                    "package": pkg,
+                    "error": err,
+                    "strict": strict_extras,
+                },
+            )
+
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "deps_sync_ok",
+            "reason": reason,
+            "source": source,
+            "extras_requested": extras,
+            "extras_installed": extras_installed,
+            "extras_errors": extras_errors,
+            "extras_strict": strict_extras,
+        },
+    )
+    if extras_errors and strict_extras:
+        return False, f"Optional deps failed (strict): {extras_errors}"
+    return True, source
 
 
 def import_test() -> Dict[str, Any]:

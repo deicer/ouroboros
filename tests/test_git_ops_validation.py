@@ -6,6 +6,7 @@ def test_run_runtime_validation_stops_on_first_failure(monkeypatch, tmp_path: pa
     from supervisor import git_ops
 
     calls = []
+    monkeypatch.setenv("OUROBOROS_RUNTIME_VALIDATE_RUFF_STRICT", "1")
 
     def fake_run(cmd, cwd=None, capture_output=False, text=False, timeout=None, check=False):
         calls.append(list(cmd))
