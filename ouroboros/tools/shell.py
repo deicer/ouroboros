@@ -15,9 +15,40 @@ import time
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import append_jsonl, run_cmd, truncate_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, run_cmd, safe_resolve_under_root, truncate_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, min_value: int = 1) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, parsed)
+
+
+def _run_shell_timeout_sec() -> int:
+    return _env_int("OUROBOROS_RUN_SHELL_TIMEOUT_SEC", 120, min_value=1)
+
+
+def _run_shell_output_cap_bytes() -> int:
+    return _env_int("OUROBOROS_RUN_SHELL_MAX_OUTPUT_BYTES", 100_000, min_value=4096)
+
+
+def _truncate_output_bytes(text: str, limit_bytes: int) -> str:
+    if limit_bytes <= 0:
+        return ""
+    data = (text or "").encode("utf-8", errors="replace")
+    if len(data) <= limit_bytes:
+        return text or ""
+    half = max(64, limit_bytes // 2)
+    head = data[:half].decode("utf-8", errors="ignore")
+    tail = data[-half:].decode("utf-8", errors="ignore")
+    return head + f"\n...(truncated at {limit_bytes} bytes)...\n" + tail
 
 
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
@@ -65,24 +96,29 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
     cmd = [str(x) for x in cmd]
 
-    work_dir = ctx.repo_dir
+    timeout_sec = _run_shell_timeout_sec()
+    output_cap_bytes = _run_shell_output_cap_bytes()
+
+    work_dir = ctx.repo_dir.resolve()
     if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
+        try:
+            candidate = safe_resolve_under_root(ctx.repo_dir, cwd)
+        except ValueError as e:
+            return f"⚠️ PATH_ERROR: {e}"
         if candidate.exists() and candidate.is_dir():
             work_dir = candidate
 
     try:
         res = subprocess.run(
             cmd, cwd=str(work_dir),
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=timeout_sec,
         )
-        out = res.stdout + ("\n--- STDERR ---\n" + res.stderr if res.stderr else "")
-        if len(out) > 50000:
-            out = out[:25000] + "\n...(truncated)...\n" + out[-25000:]
+        out = (res.stdout or "") + ("\n--- STDERR ---\n" + (res.stderr or "") if res.stderr else "")
+        out = _truncate_output_bytes(out, output_cap_bytes)
         prefix = f"exit_code={res.returncode}\n"
         return prefix + out
     except subprocess.TimeoutExpired:
-        return "⚠️ TIMEOUT: command exceeded 120s."
+        return f"⚠️ TIMEOUT: command exceeded {timeout_sec}s."
     except Exception as e:
         return f"⚠️ SHELL_ERROR: {e}"
 
@@ -794,7 +830,7 @@ def get_tools() -> List[ToolEntry]:
                 "cmd": {"type": "array", "items": {"type": "string"}},
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["cmd"]},
-        }, _run_shell, is_code_tool=True),
+        }, _run_shell, is_code_tool=True, timeout_sec=_run_shell_timeout_sec()),
         ToolEntry("opencode_edit", {
             "name": "opencode_edit",
             "description": "Delegate code edits to OpenCode CLI. The sole way to edit code. Follow with repo_commit_push.",
