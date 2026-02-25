@@ -75,6 +75,7 @@ class E2EHarness:
 
         # Init as git repo
         subprocess.run(["git", "init"], cwd=str(self.repo_dir), capture_output=True, check=True)
+        (self.repo_dir / 'dummy.txt').touch()
         subprocess.run(["git", "add", "-A"], cwd=str(self.repo_dir), capture_output=True, check=True)
         subprocess.run(
             ["git", "commit", "-m", "initial"],
