@@ -147,6 +147,65 @@ def _append_evolution_lesson(evt: Dict[str, Any], ctx: Any) -> None:
     improve_path.write_text(current + lesson, encoding="utf-8")
 
 
+def _detect_evolution_error_signal(task_id: str, ctx: Any) -> str:
+    """Detect strongest error signal for evolution task from recent events log."""
+    if not task_id:
+        return ""
+    try:
+        from ouroboros.memory import Memory
+
+        mem = Memory(drive_root=ctx.DRIVE_ROOT)
+        entries = mem.read_jsonl_tail("events.jsonl", max_entries=800)
+        for e in reversed(entries):
+            if str(e.get("task_id") or "") != task_id:
+                continue
+            event_type = str(e.get("type") or "")
+            if event_type in {"tool_error", "task_error", "llm_api_error", "tool_timeout"}:
+                return event_type
+    except Exception:
+        log.debug("Failed to detect evolution error signal", exc_info=True)
+    return ""
+
+
+def _append_evolution_attempt_result(evt: Dict[str, Any], ctx: Any, success: bool) -> None:
+    """Log each completed evolution attempt with classified reason."""
+    task_id = str(evt.get("task_id") or "")
+    if not task_id:
+        return
+
+    cost = round(float(evt.get("cost_usd") or 0.0), 6)
+    rounds = int(evt.get("total_rounds") or 0)
+    error_signal = _detect_evolution_error_signal(task_id, ctx)
+
+    if success:
+        reason = "success_heuristic"
+        status = "success"
+    else:
+        status = "failure"
+        if error_signal in {"tool_error", "task_error", "tool_timeout"}:
+            reason = "runtime_error"
+        elif error_signal == "llm_api_error":
+            reason = "llm_api_error"
+        elif cost <= 0.10 and rounds < 1:
+            reason = "low_activity"
+        else:
+            reason = "heuristic_failure"
+
+    ctx.append_jsonl(
+        ctx.DRIVE_ROOT / "logs" / "evolution_log.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "evolution_attempt_result",
+            "task_id": task_id,
+            "status": status,
+            "reason": reason,
+            "error_signal": error_signal or None,
+            "cost_usd": cost,
+            "total_rounds": rounds,
+        },
+    )
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     task_type = str(evt.get("task_type") or "")
@@ -186,6 +245,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "rounds": rounds,
                 },
             )
+        _append_evolution_attempt_result(evt, ctx, success=evolution_success)
 
     if task_id:
         ctx.RUNNING.pop(str(task_id), None)
@@ -409,8 +469,24 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle evolution mode from LLM tool call."""
     enabled = bool(evt.get("enabled"))
     st = ctx.load_state()
+    prev_failures = int(st.get("evolution_consecutive_failures") or 0)
     st["evolution_mode_enabled"] = enabled
+    reset_done = False
+    if enabled and prev_failures > 0:
+        st["evolution_consecutive_failures"] = 0
+        reset_done = True
     ctx.save_state(st)
+    if reset_done:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "evolution_log.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "evolution_breaker_reset",
+                "source": "toggle_evolution_tool",
+                "reason": "manual_enable",
+                "previous_failures": prev_failures,
+            },
+        )
     if not enabled:
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
         ctx.sort_pending()

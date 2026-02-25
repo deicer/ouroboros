@@ -509,7 +509,20 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
         action = parts[1] if len(parts) > 1 else "on"
         turn_on = action not in ("off", "stop", "0")
         st2 = load_state()
+        prev_failures = int(st2.get("evolution_consecutive_failures") or 0)
         st2["evolution_mode_enabled"] = bool(turn_on)
+        if turn_on and prev_failures > 0:
+            st2["evolution_consecutive_failures"] = 0
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "evolution_log.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "evolution_breaker_reset",
+                    "source": "owner_command:/evolve",
+                    "reason": "manual_enable",
+                    "previous_failures": prev_failures,
+                },
+            )
         save_state(st2)
         if not turn_on:
             with _queue_lock:

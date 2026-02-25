@@ -17,8 +17,13 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
-    load_state, save_state, append_jsonl, atomic_write_text,
-    QUEUE_SNAPSHOT_PATH, openrouter_budget_remaining, EVOLUTION_BUDGET_RESERVE,
+    EVOLUTION_BUDGET_RESERVE,
+    QUEUE_SNAPSHOT_PATH,
+    append_jsonl,
+    atomic_write_text,
+    load_state,
+    openrouter_budget_remaining,
+    save_state,
 )
 from supervisor.telegram import send_with_budget
 
@@ -248,7 +253,7 @@ def enforce_task_timeouts() -> None:
     """Check all RUNNING tasks for timeouts and enforce them."""
     # Import here to avoid circular dependency during module load
     from supervisor import workers
-    
+
     if not RUNNING:
         return
     now = time.time()
@@ -356,6 +361,21 @@ def build_review_task_text(reason: str) -> str:
     return f"REVIEW: {reason or 'owner request'}"
 
 
+def _append_evolution_log(event_type: str, **payload: Any) -> None:
+    """Append evolution scheduling/circuit-breaker events to evolution_log.jsonl."""
+    try:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "evolution_log.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": event_type,
+                **payload,
+            },
+        )
+    except Exception:
+        log.warning("Failed to append evolution log event: %s", event_type, exc_info=True)
+
+
 def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
     """Queue a review task."""
     st = load_state()
@@ -395,6 +415,12 @@ def enqueue_evolution_task_if_needed() -> None:
     if consecutive_failures >= 3:
         st["evolution_mode_enabled"] = False
         save_state(st)
+        _append_evolution_log(
+            "evolution_breaker_open",
+            reason="consecutive_failures",
+            consecutive_failures=consecutive_failures,
+            action="pause_evolution",
+        )
         send_with_budget(
             int(owner_chat_id),
             f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
@@ -406,6 +432,13 @@ def enqueue_evolution_task_if_needed() -> None:
     if remaining < EVOLUTION_BUDGET_RESERVE:
         st["evolution_mode_enabled"] = False
         save_state(st)
+        _append_evolution_log(
+            "evolution_budget_stop",
+            reason="budget_below_reserve",
+            remaining_budget=round(float(remaining), 4),
+            reserve_budget=round(float(EVOLUTION_BUDGET_RESERVE), 4),
+            action="pause_evolution",
+        )
         send_with_budget(int(owner_chat_id), f"💸 Evolution stopped: ${remaining:.2f} remaining (reserve ${EVOLUTION_BUDGET_RESERVE:.0f} for conversations).")
         return
     cycle = int(st.get("evolution_cycle") or 0) + 1
@@ -418,4 +451,11 @@ def enqueue_evolution_task_if_needed() -> None:
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     save_state(st)
+    _append_evolution_log(
+        "evolution_enqueued",
+        task_id=tid,
+        cycle=cycle,
+        remaining_budget=round(float(remaining), 4),
+        consecutive_failures=consecutive_failures,
+    )
     send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")
