@@ -180,8 +180,11 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
 # ---------------------------------------------------------------------------
 
 _AUTO_RESUME_TEXT = (
-    "[auto-resume after restart] Continue your work. Read scratchpad and identity "
-    "— they contain context of what you were doing."
+    "[auto-resume after restart] Continue the latest unfinished work item. "
+    "Use Recent thinking trace, Recent progress, Recent chat, goals.json, and scratchpad. "
+    "Do NOT send a generic 'restored context' summary. "
+    "First do one concrete next action, then report only factual updates with timestamps. "
+    "If context is unclear, explicitly say what is unknown."
 )
 
 
