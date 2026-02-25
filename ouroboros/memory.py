@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
+from ouroboros.utils import append_jsonl, read_text, short, utc_now_iso, write_text
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,12 @@ class Memory:
 
     def logs_path(self, name: str) -> pathlib.Path:
         return (self.drive_root / "logs" / name).resolve()
+
+    def chat_history_summary_path(self) -> pathlib.Path:
+        return self._memory_path("chat_history_summary.md")
+
+    def chat_archive_path(self) -> pathlib.Path:
+        return self.logs_path("chat.archive.jsonl")
 
     # --- Load / save ---
 
@@ -126,6 +133,164 @@ class Memory:
 
     # --- Chat history ---
 
+    def _parse_jsonl_lines(self, lines: List[str], source: str = "") -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                if source:
+                    log.debug("Failed to parse JSON line in %s: %s", source, line[:100], exc_info=True)
+                continue
+            if isinstance(parsed, dict):
+                entries.append(parsed)
+        return entries
+
+    def _read_chat_raw_lines(self) -> List[str]:
+        chat_path = self.logs_path("chat.jsonl")
+        if not chat_path.exists():
+            return []
+        text = chat_path.read_text(encoding="utf-8")
+        return [line for line in text.splitlines() if line.strip()]
+
+    def load_history(self, limit: int = 0, offset: int = 0, search: str = "") -> List[Dict[str, Any]]:
+        """
+        Load chat history entries.
+
+        - limit > 0: read tail only (fast path)
+        - limit <= 0: read full file
+        """
+        self._maybe_auto_compact_history()
+
+        if limit > 0:
+            entries = self.read_jsonl_tail("chat.jsonl", max_entries=limit)
+        else:
+            entries = self._parse_jsonl_lines(self._read_chat_raw_lines(), source="load_history")
+
+        if search:
+            search_lower = str(search).lower()
+            entries = [e for e in entries if search_lower in str(e.get("text", "")).lower()]
+
+        if offset > 0:
+            entries = entries[:-offset] if offset < len(entries) else []
+
+        return entries
+
+    def summarize_old_history(self, keep_last_n: int = 100) -> str:
+        """
+        Compact old chat history into summary + archive, keep only recent N in chat.jsonl.
+
+        Returns a human-readable status string.
+        """
+        keep_last_n = max(1, int(keep_last_n or 100))
+
+        chat_path = self.logs_path("chat.jsonl")
+        if not chat_path.exists():
+            return "No chat history to compact."
+
+        lines = self._read_chat_raw_lines()
+        if len(lines) <= keep_last_n:
+            return f"No compaction needed: {len(lines)} messages (<= keep_last_n={keep_last_n})."
+
+        old_lines = lines[:-keep_last_n]
+        recent_lines = lines[-keep_last_n:]
+        old_entries = self._parse_jsonl_lines(old_lines, source="summarize_old_history")
+
+        # 1) Archive raw old lines for full fidelity
+        archive_path = self.chat_archive_path()
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with archive_path.open("a", encoding="utf-8") as f:
+            if old_lines:
+                f.write("\n".join(old_lines) + "\n")
+
+        # 2) Replace active chat log with recent tail
+        chat_path.parent.mkdir(parents=True, exist_ok=True)
+        with chat_path.open("w", encoding="utf-8") as f:
+            if recent_lines:
+                f.write("\n".join(recent_lines) + "\n")
+
+        # 3) Append compact summary block
+        summary_path = self.chat_history_summary_path()
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        incoming = sum(
+            1 for e in old_entries
+            if str(e.get("direction", "")).lower() not in ("out", "outgoing")
+        )
+        outgoing = max(0, len(old_entries) - incoming)
+        first_ts = str((old_entries[0] if old_entries else {}).get("ts", ""))
+        last_ts = str((old_entries[-1] if old_entries else {}).get("ts", ""))
+        compact_tail = self.summarize_chat(old_entries[-80:]) if old_entries else ""
+        summary_block = (
+            f"## {utc_now_iso()} — chat compaction\n\n"
+            f"- Compacted messages: {len(old_lines)}\n"
+            f"- Kept in active history: {len(recent_lines)}\n"
+            f"- Inbound: {incoming}, Outbound: {outgoing}\n"
+            f"- Time range: {first_ts} .. {last_ts}\n\n"
+            f"### Snapshot (last 80 compacted messages)\n\n"
+            f"{compact_tail or '(no parsable messages)'}\n\n"
+        )
+        with summary_path.open("a", encoding="utf-8") as f:
+            f.write(summary_block)
+
+        append_jsonl(self.logs_path("events.jsonl"), {
+            "ts": utc_now_iso(),
+            "type": "chat_history_compacted",
+            "compacted_count": len(old_lines),
+            "kept_count": len(recent_lines),
+            "inbound_count": incoming,
+            "outbound_count": outgoing,
+            "archive_path": str(archive_path),
+            "summary_path": str(summary_path),
+        })
+
+        return (
+            f"Compacted {len(old_lines)} old messages. "
+            f"Kept {len(recent_lines)} recent messages. "
+            f"Archive: {archive_path.name}, summary: {summary_path.name}"
+        )
+
+    def _maybe_auto_compact_history(self) -> None:
+        """
+        Auto-compact chat history when file size exceeds configured threshold.
+        """
+        enabled = str(os.environ.get("OUROBOROS_CHAT_HISTORY_AUTO_SUMMARIZE", "true")).strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return
+
+        chat_path = self.logs_path("chat.jsonl")
+        if not chat_path.exists():
+            return
+
+        try:
+            max_bytes = int(str(os.environ.get("OUROBOROS_CHAT_HISTORY_MAX_BYTES", "2000000")).strip())
+        except (TypeError, ValueError):
+            max_bytes = 2_000_000
+        if max_bytes <= 0:
+            return
+
+        try:
+            current_size = int(chat_path.stat().st_size)
+        except OSError:
+            return
+
+        if current_size <= max_bytes:
+            return
+
+        try:
+            keep_last_n = int(str(os.environ.get("OUROBOROS_CHAT_HISTORY_KEEP_LAST_N", "1000")).strip())
+        except (TypeError, ValueError):
+            keep_last_n = 1000
+        keep_last_n = max(1, keep_last_n)
+
+        try:
+            result = self.summarize_old_history(keep_last_n=keep_last_n)
+            log.info("Auto compacted chat history: %s", result)
+        except Exception:
+            log.warning("Auto chat history compaction failed", exc_info=True)
+
     def chat_history(self, count: int = 100, offset: int = 0, search: str = "") -> str:
         """Read from logs/chat.jsonl. count messages, offset from end, filter by search."""
         chat_path = self.logs_path("chat.jsonl")
@@ -133,24 +298,16 @@ class Memory:
             return "(chat history is empty)"
 
         try:
-            raw_lines = chat_path.read_text(encoding="utf-8").strip().split("\n")
-            entries = []
-            for line in raw_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except Exception:
-                    log.debug(f"Failed to parse JSON line in chat_history: {line[:100]}")
-                    continue
+            count = max(1, int(count or 100))
+            offset = max(0, int(offset or 0))
 
             if search:
-                search_lower = search.lower()
-                entries = [e for e in entries if search_lower in str(e.get("text", "")).lower()]
-
-            if offset > 0:
-                entries = entries[:-offset] if offset < len(entries) else []
+                # Search needs wider scan.
+                entries = self.load_history(limit=0, offset=offset, search=search)
+            else:
+                # Fast path: tail-only read, no full-file scan.
+                tail_n = max(1, count + offset)
+                entries = self.load_history(limit=tail_n, offset=offset, search="")
 
             entries = entries[-count:] if count < len(entries) else entries
 
