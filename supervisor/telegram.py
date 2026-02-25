@@ -10,11 +10,12 @@ import datetime
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from supervisor.state import load_state, save_state, append_jsonl
+from supervisor.state import append_jsonl, load_state, save_state
 
 log = logging.getLogger(__name__)
 
@@ -45,13 +46,44 @@ def get_tg() -> "TelegramClient":
 # ---------------------------------------------------------------------------
 
 class TelegramClient:
+    _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    _RETRY_BACKOFF_SEC = (1.0, 2.0, 4.0)
+
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}"
         self._token = token
 
+    @staticmethod
+    def _extract_retry_after(data: Any) -> float:
+        if not isinstance(data, dict):
+            return 0.0
+        params = data.get("parameters")
+        if not isinstance(params, dict):
+            return 0.0
+        raw = params.get("retry_after")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, min(value, 60.0))
+
+    @classmethod
+    def _retry_delay_sec(cls, attempt: int, data: Any = None) -> float:
+        retry_after = cls._extract_retry_after(data)
+        if retry_after > 0:
+            return retry_after
+        if attempt < len(cls._RETRY_BACKOFF_SEC):
+            return cls._RETRY_BACKOFF_SEC[attempt]
+        return cls._RETRY_BACKOFF_SEC[-1]
+
+    @classmethod
+    def _is_retryable_status(cls, status_code: int) -> bool:
+        return int(status_code or 0) in cls._RETRYABLE_STATUS
+
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         last_err = "unknown"
         for attempt in range(3):
+            should_retry = False
             try:
                 r = requests.get(
                     f"{self.base}/getUpdates",
@@ -59,37 +91,67 @@ class TelegramClient:
                             "allowed_updates": ["message", "edited_message"]},
                     timeout=timeout + 5,
                 )
-                r.raise_for_status()
-                data = r.json()
-                if data.get("ok") is not True:
-                    raise RuntimeError(f"Telegram getUpdates failed: {data}")
-                return data.get("result") or []
+                data: Dict[str, Any] = {}
+                try:
+                    data = r.json() if r.content else {}
+                except Exception:
+                    data = {}
+
+                status_code = int(r.status_code or 0)
+                if status_code == 200 and data.get("ok") is True:
+                    return data.get("result") or []
+
+                last_err = f"telegram_getUpdates_error: status={status_code} data={data}"
+                if self._is_retryable_status(status_code) and attempt < 2:
+                    should_retry = True
+                    time.sleep(self._retry_delay_sec(attempt, data))
+                    continue
+
+                if status_code >= 400:
+                    raise RuntimeError(last_err)
+                raise RuntimeError(f"Telegram getUpdates failed: {data}")
             except Exception as e:
                 last_err = repr(e)
-                if attempt < 2:
-                    import time
-                    time.sleep(0.8 * (attempt + 1))
+                should_retry = should_retry or isinstance(e, requests.RequestException)
+                if should_retry and attempt < 2:
+                    time.sleep(self._retry_delay_sec(attempt))
+                    continue
+                break
         raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "") -> Tuple[bool, str]:
         last_err = "unknown"
         for attempt in range(3):
+            should_retry = False
             try:
                 payload: Dict[str, Any] = {"chat_id": chat_id, "text": text,
                                            "disable_web_page_preview": True}
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
                 r = requests.post(f"{self.base}/sendMessage", data=payload, timeout=30)
-                r.raise_for_status()
-                data = r.json()
-                if data.get("ok") is True:
+                data: Dict[str, Any] = {}
+                try:
+                    data = r.json() if r.content else {}
+                except Exception:
+                    data = {}
+                status_code = int(r.status_code or 0)
+
+                if status_code == 200 and data.get("ok") is True:
                     return True, "ok"
-                last_err = f"telegram_api_error: {data}"
+
+                last_err = f"telegram_api_error: status={status_code} data={data}"
+                if self._is_retryable_status(status_code) and attempt < 2:
+                    should_retry = True
+                    time.sleep(self._retry_delay_sec(attempt, data))
+                    continue
             except Exception as e:
                 last_err = repr(e)
-            if attempt < 2:
-                import time
-                time.sleep(0.8 * (attempt + 1))
+                should_retry = isinstance(e, requests.RequestException)
+            if should_retry and attempt < 2:
+                time.sleep(self._retry_delay_sec(attempt))
+                continue
+            if not should_retry:
+                break
         return False, last_err
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
