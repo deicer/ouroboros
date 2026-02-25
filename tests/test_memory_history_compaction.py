@@ -40,6 +40,9 @@ def test_summarize_old_history_archives_and_keeps_tail(tmp_path):
     summary_text = mem.chat_history_summary_path().read_text(encoding="utf-8")
     assert "chat compaction" in summary_text
     assert "Compacted messages: 4" in summary_text
+    dialogue_summary_text = mem.dialogue_summary_path().read_text(encoding="utf-8")
+    assert "chat compaction" in dialogue_summary_text
+    assert "Compacted messages: 4" in dialogue_summary_text
 
 
 def test_summarize_old_history_noop_when_small(tmp_path):
@@ -51,6 +54,7 @@ def test_summarize_old_history_noop_when_small(tmp_path):
     assert "No compaction needed" in result
     assert not mem.chat_archive_path().exists()
     assert not mem.chat_history_summary_path().exists()
+    assert not mem.dialogue_summary_path().exists()
 
 
 def test_chat_history_auto_compacts_when_too_large(monkeypatch, tmp_path):
@@ -69,3 +73,23 @@ def test_chat_history_auto_compacts_when_too_large(monkeypatch, tmp_path):
     assert len(active_lines) == 2
     assert mem.chat_archive_path().exists()
     assert mem.chat_history_summary_path().exists()
+    assert mem.dialogue_summary_path().exists()
+
+
+def test_context_compaction_uses_message_count_cap(monkeypatch, tmp_path):
+    mem = Memory(drive_root=tmp_path)
+    chat_path = mem.logs_path("chat.jsonl")
+    _write_chat(chat_path, 9)
+
+    monkeypatch.setenv("OUROBOROS_CHAT_HISTORY_AUTO_SUMMARIZE", "true")
+    monkeypatch.setenv("OUROBOROS_CHAT_HISTORY_MAX_ACTIVE_MESSAGES", "4")
+    monkeypatch.setenv("OUROBOROS_CHAT_HISTORY_KEEP_LAST_N", "3")
+
+    mem.ensure_chat_history_compacted_for_context()
+
+    active_lines = [x for x in chat_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert len(active_lines) == 3
+    assert "msg-6" in active_lines[0]
+    assert "msg-8" in active_lines[-1]
+    assert mem.chat_archive_path().exists()
+    assert mem.dialogue_summary_path().exists()

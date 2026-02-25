@@ -14,13 +14,30 @@ import os
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.utils import (
-    utc_now_iso, read_text, clip_text, estimate_tokens, get_git_info,
-    get_budget_remaining,
-)
 from ouroboros.memory import Memory
+from ouroboros.utils import (
+    clip_text,
+    estimate_tokens,
+    get_budget_remaining,
+    get_git_info,
+    read_text,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, min_value: int = 1, max_value: Optional[int] = None) -> int:
+    raw = os.environ.get(name)
+    try:
+        val = int(str(raw).strip()) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        val = int(default)
+    if val < min_value:
+        val = min_value
+    if max_value is not None and val > max_value:
+        val = max_value
+    return val
 
 
 def _build_user_content(task: Dict[str, Any]) -> Any:
@@ -99,18 +116,34 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
     return "## Runtime context\n\n" + runtime_ctx
 
 
+def _build_execution_strategy_section(task: Dict[str, Any]) -> str:
+    """Guidance to keep direct chat responsive by offloading heavy operations."""
+    if not bool(task.get("_is_direct_chat")):
+        return ""
+    return (
+        "## Execution Strategy\n\n"
+        "- Keep direct chat fast and incremental.\n"
+        "- For heavy operations (large refactors, deep audits, long diagnostics), use "
+        "`schedule_task` and then `wait_for_task`/`get_task_result`.\n"
+        "- Persist durable outcomes in Goals/User Context/Dialogue Summary rather than raw long logs."
+    )
+
+
 def _build_memory_sections(memory: Memory) -> List[str]:
     """Build scratchpad, identity, user context, dialogue summary sections."""
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
-    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+    scratchpad_clip = _env_int("OUROBOROS_CONTEXT_SCRATCHPAD_CLIP_CHARS", 16000, min_value=2000)
+    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, scratchpad_clip))
 
     identity_raw = memory.load_identity()
-    sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
+    identity_clip = _env_int("OUROBOROS_CONTEXT_IDENTITY_CLIP_CHARS", 12000, min_value=2000)
+    sections.append("## Identity\n\n" + clip_text(identity_raw, identity_clip))
 
     user_context_raw = memory.load_user_context()
-    sections.append("## User Context\n\n" + clip_text(user_context_raw, 5000))
+    user_context_clip = _env_int("OUROBOROS_CONTEXT_USER_CONTEXT_CLIP_CHARS", 3000, min_value=500)
+    sections.append("## User Context\n\n" + clip_text(user_context_raw, user_context_clip))
 
     goals_path = memory.drive_root / "memory" / "goals.json"
     if goals_path.exists():
@@ -127,21 +160,40 @@ def _build_memory_sections(memory: Memory) -> List[str]:
                 log.debug("Failed to parse goals.json for context; using raw content", exc_info=True)
 
             if goals_text.strip():
-                sections.append("## Goals\n\n" + clip_text(goals_text, 12000))
+                goals_clip = _env_int("OUROBOROS_CONTEXT_GOALS_CLIP_CHARS", 8000, min_value=1000)
+                sections.append("## Goals\n\n" + clip_text(goals_text, goals_clip))
 
-    # Dialogue summary (key moments from chat history)
-    summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
-    if summary_path.exists():
-        summary_text = read_text(summary_path)
-        if summary_text.strip():
-            sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, 20000))
+    # Dialogue summaries (canonical + legacy fallback)
+    summary_clip = _env_int("OUROBOROS_CONTEXT_DIALOGUE_SUMMARY_CLIP_CHARS", 14000, min_value=1000)
+    summary_paths = [
+        ("dialogue_summary.md", memory.drive_root / "memory" / "dialogue_summary.md"),
+        ("chat_history_summary.md", memory.drive_root / "memory" / "chat_history_summary.md"),
+    ]
+    summary_parts: List[str] = []
+    seen_summary_texts: set[str] = set()
+    for label, path in summary_paths:
+        if not path.exists():
+            continue
+        summary_text = read_text(path).strip()
+        if not summary_text or summary_text in seen_summary_texts:
+            continue
+        seen_summary_texts.add(summary_text)
+        if label == "dialogue_summary.md":
+            summary_parts.append(clip_text(summary_text, summary_clip))
+        else:
+            summary_parts.append(
+                "(legacy compacted history)\n\n" + clip_text(summary_text, summary_clip)
+            )
+    if summary_parts:
+        sections.append("## Dialogue Summary\n\n" + "\n\n---\n\n".join(summary_parts))
 
     # Evolution log (recent self-improvement cycles)
     evolution_log_path = memory.drive_root / "memory" / "evolution_log.md"
     if evolution_log_path.exists():
         evo_text = read_text(evolution_log_path)
         if evo_text.strip():
-            sections.append("## Evolution Log (recent)\n\n" + clip_text(evo_text, 10000))
+            evo_clip = _env_int("OUROBOROS_CONTEXT_EVOLUTION_LOG_CLIP_CHARS", 7000, min_value=1000)
+            sections.append("## Evolution Log (recent)\n\n" + clip_text(evo_text, evo_clip))
 
     return sections
 
@@ -149,27 +201,35 @@ def _build_memory_sections(memory: Memory) -> List[str]:
 def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
     """Build recent chat, recent progress, recent tools, recent events sections."""
     sections = []
+    chat_tail = _env_int("OUROBOROS_CONTEXT_CHAT_TAIL", 80, min_value=10)
+    progress_tail = _env_int("OUROBOROS_CONTEXT_PROGRESS_TAIL", 120, min_value=10)
+    tools_tail = _env_int("OUROBOROS_CONTEXT_TOOLS_TAIL", 120, min_value=10)
+    events_tail = _env_int("OUROBOROS_CONTEXT_EVENTS_TAIL", 120, min_value=10)
+    supervisor_tail = _env_int("OUROBOROS_CONTEXT_SUPERVISOR_TAIL", 120, min_value=10)
+    thinking_tail = _env_int("OUROBOROS_CONTEXT_THINKING_TAIL", 160, min_value=10)
+    thinking_limit = _env_int("OUROBOROS_CONTEXT_THINKING_SUMMARY_LIMIT", 20, min_value=5, max_value=100)
+    progress_limit = _env_int("OUROBOROS_CONTEXT_PROGRESS_SUMMARY_LIMIT", 10, min_value=3, max_value=30)
 
     chat_summary = memory.summarize_chat(
-        memory.read_jsonl_tail("chat.jsonl", 200))
+        memory.read_jsonl_tail("chat.jsonl", chat_tail))
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
-    progress_entries = memory.read_jsonl_tail("progress.jsonl", 200)
+    progress_entries = memory.read_jsonl_tail("progress.jsonl", progress_tail)
     if task_id:
         progress_entries = [e for e in progress_entries if e.get("task_id") == task_id]
-    progress_summary = memory.summarize_progress(progress_entries, limit=15)
+    progress_summary = memory.summarize_progress(progress_entries, limit=progress_limit)
     if progress_summary:
         sections.append("## Recent progress\n\n" + progress_summary)
 
-    tools_entries = memory.read_jsonl_tail("tools.jsonl", 200)
+    tools_entries = memory.read_jsonl_tail("tools.jsonl", tools_tail)
     if task_id:
         tools_entries = [e for e in tools_entries if e.get("task_id") == task_id]
     tools_summary = memory.summarize_tools(tools_entries)
     if tools_summary:
         sections.append("## Recent tools\n\n" + tools_summary)
 
-    events_entries = memory.read_jsonl_tail("events.jsonl", 200)
+    events_entries = memory.read_jsonl_tail("events.jsonl", events_tail)
     if task_id:
         events_entries = [e for e in events_entries if e.get("task_id") == task_id]
     events_summary = memory.summarize_events(events_entries)
@@ -177,19 +237,19 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
         sections.append("## Recent events\n\n" + events_summary)
 
     supervisor_summary = memory.summarize_supervisor(
-        memory.read_jsonl_tail("supervisor.jsonl", 200))
+        memory.read_jsonl_tail("supervisor.jsonl", supervisor_tail))
     if supervisor_summary:
         sections.append("## Supervisor\n\n" + supervisor_summary)
 
-    thinking_entries = memory.read_jsonl_tail("thinking_trace.jsonl", 400)
+    thinking_entries = memory.read_jsonl_tail("thinking_trace.jsonl", thinking_tail)
     thinking_summary = memory.summarize_thinking_trace(
-        thinking_entries, limit=30, task_id=task_id
+        thinking_entries, limit=thinking_limit, task_id=task_id
     )
     if not thinking_summary and task_id:
         # Fallback for restart continuity: when current task is new,
         # still provide the latest global trace.
         thinking_summary = memory.summarize_thinking_trace(
-            thinking_entries, limit=30, task_id=""
+            thinking_entries, limit=thinking_limit, task_id=""
         )
     if thinking_summary:
         sections.append("## Recent thinking trace\n\n" + thinking_summary)
@@ -360,6 +420,11 @@ def build_llm_messages(
 
     # --- Load memory ---
     memory.ensure_files()
+    # Keep active chat log compact so context includes recent messages + summaries.
+    try:
+        memory.ensure_chat_history_compacted_for_context()
+    except Exception:
+        log.debug("Failed to auto-compact history before building context", exc_info=True)
 
     # --- Assemble messages with 3-block prompt caching ---
     # Block 1: Static content (SYSTEM.md + BIBLE.md + README) — cached
@@ -394,6 +459,9 @@ def build_llm_messages(
         "## Drive state\n\n" + clip_text(state_json, 90000),
         _build_runtime_section(env, task),
     ]
+    execution_strategy = _build_execution_strategy_section(task)
+    if execution_strategy:
+        dynamic_parts.append(execution_strategy)
 
     # Health invariants — surfaces anomalies for LLM-first self-detection
     health_section = _build_health_invariants(env)
@@ -438,7 +506,8 @@ def build_llm_messages(
     ]
 
     # --- Soft-cap token trimming ---
-    messages, cap_info = apply_message_token_soft_cap(messages, 200000)
+    soft_cap_tokens = _env_int("OUROBOROS_CONTEXT_SOFT_CAP_TOKENS", 120000, min_value=10000)
+    messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)
 
     return messages, cap_info
 

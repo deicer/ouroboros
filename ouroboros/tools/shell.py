@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -466,6 +467,97 @@ def _parse_fast_edit_prompt(prompt: str) -> Dict[str, Any]:
     return {}
 
 
+def _is_heavy_opencode_prompt(prompt: str) -> tuple[bool, str]:
+    text = str(prompt or "")
+    lowered = text.lower()
+    char_count = len(text)
+    line_count = text.count("\n") + 1
+
+    max_chars = _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_CHARS", 900, min_value=200)
+    max_lines = _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_LINES", 28, min_value=5)
+
+    if char_count > max_chars:
+        return True, f"chars>{max_chars}"
+    if line_count > max_lines:
+        return True, f"lines>{max_lines}"
+
+    default_keywords = (
+        "refactor",
+        "рефактор",
+        "декомпоз",
+        "архитект",
+        "audit",
+        "ревью",
+        "review",
+        "deep research",
+        "поиск баг",
+        "diagnos",
+        "диагност",
+        "entire project",
+        "whole project",
+        "full project",
+    )
+    for kw in default_keywords:
+        if kw in lowered:
+            return True, f"keyword:{kw}"
+
+    return False, ""
+
+
+def _offload_opencode_to_worker(
+    ctx: ToolContext,
+    prompt: str,
+    cwd: str,
+    reason: str,
+) -> str:
+    task_id = uuid.uuid4().hex[:8]
+    prompt_preview = truncate_for_log(prompt.replace("\n", " "), 140)
+    description = f"Выполни правку кода через opencode_edit: {prompt_preview}"
+    parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    context_lines = [
+        "Авто-маршрутизация тяжёлой правки из direct chat в worker.",
+        f"Причина: {reason}",
+        f"CWD hint: {cwd or '.'}",
+        "Сделай 1 вызов opencode_edit с исходным prompt ниже.",
+        "После правки проверь изменения и дай краткий отчёт на русском.",
+        "",
+        "[BEGIN_OPENCODE_PROMPT]",
+        prompt,
+        "[END_OPENCODE_PROMPT]",
+    ]
+
+    evt: Dict[str, Any] = {
+        "type": "schedule_task",
+        "task_id": task_id,
+        "description": description,
+        "context": "\n".join(context_lines),
+        "ts": utc_now_iso(),
+    }
+    if parent_task_id:
+        evt["parent_task_id"] = parent_task_id
+    ctx.pending_events.append(evt)
+
+    try:
+        append_jsonl(
+            ctx.drive_logs() / "events.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "opencode_offloaded_to_worker",
+                "task_id": parent_task_id,
+                "scheduled_task_id": task_id,
+                "reason": reason,
+                "prompt_preview": truncate_for_log(prompt, 400),
+            },
+        )
+    except Exception:
+        log.debug("Failed to log opencode offload event", exc_info=True)
+
+    return (
+        f"↪️ HEAVY_OPENCODE_OFFLOADED: scheduled task {task_id}. "
+        "Use wait_for_task with this id to track completion."
+    )
+
+
 def _resolve_fast_edit_target(repo_dir: pathlib.Path, work_dir: str, file_rel: str) -> pathlib.Path:
     base = pathlib.Path(work_dir).resolve()
     candidate = (base / file_rel).resolve()
@@ -727,6 +819,28 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             budget_exhausted=False,
             failure_reason="prompt_too_large",
         )
+
+    if getattr(ctx, "is_direct_chat", False) and _env_bool(
+        "OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT",
+        default=True,
+    ):
+        is_heavy, heavy_reason = _is_heavy_opencode_prompt(prompt)
+        if is_heavy:
+            return _finish(
+                _offload_opencode_to_worker(
+                    ctx=ctx,
+                    prompt=prompt,
+                    cwd=cwd,
+                    reason=heavy_reason,
+                ),
+                ok=True,
+                route="offload_to_worker",
+                fallback_used=False,
+                attempts_total=0,
+                models_tried=[],
+                budget_exhausted=False,
+                fast_edit_reason=heavy_reason,
+            )
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     work_dir = str(ctx.repo_dir)

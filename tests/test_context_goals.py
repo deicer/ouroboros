@@ -4,7 +4,6 @@ import pathlib
 from ouroboros.context import build_llm_messages
 from ouroboros.memory import Memory
 
-
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -68,3 +67,22 @@ def test_build_llm_messages_skips_empty_goals_json(tmp_path):
 
     semi_stable = _semi_stable_text(messages)
     assert "## Goals" not in semi_stable
+
+
+def test_build_llm_messages_reads_legacy_chat_history_summary(tmp_path):
+    legacy_summary = tmp_path / "memory" / "chat_history_summary.md"
+    legacy_summary.parent.mkdir(parents=True, exist_ok=True)
+    legacy_summary.write_text("Legacy summary block", encoding="utf-8")
+
+    env = _TestEnv(repo_root=REPO, drive_root=tmp_path)
+    memory = Memory(drive_root=tmp_path, repo_dir=REPO)
+    messages, _ = build_llm_messages(
+        env=env,
+        memory=memory,
+        task={"id": "task-legacy-summary", "type": "user", "text": "check summary"},
+    )
+
+    semi_stable = _semi_stable_text(messages)
+    assert "## Dialogue Summary" in semi_stable
+    assert "legacy compacted history" in semi_stable
+    assert "Legacy summary block" in semi_stable

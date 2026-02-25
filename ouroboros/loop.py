@@ -723,7 +723,7 @@ def _maybe_auto_compact_context(
     if context_window <= 0:
         return messages
 
-    threshold_pct = _env_float("OUROBOROS_AUTO_CONTEXT_COMPACT_AT_PCT", 70.0)
+    threshold_pct = _env_float("OUROBOROS_AUTO_CONTEXT_COMPACT_AT_PCT", 45.0)
     threshold_pct = max(10.0, min(threshold_pct, 95.0))
     threshold_tokens = int(context_window * (threshold_pct / 100.0))
     ctx_tokens = _estimate_context_tokens(messages)

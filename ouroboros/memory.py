@@ -58,6 +58,9 @@ class Memory:
     def chat_history_summary_path(self) -> pathlib.Path:
         return self._memory_path("chat_history_summary.md")
 
+    def dialogue_summary_path(self) -> pathlib.Path:
+        return self._memory_path("dialogue_summary.md")
+
     def chat_archive_path(self) -> pathlib.Path:
         return self.logs_path("chat.archive.jsonl")
 
@@ -214,7 +217,9 @@ class Memory:
 
         # 3) Append compact summary block
         summary_path = self.chat_history_summary_path()
+        dialogue_summary_path = self.dialogue_summary_path()
         summary_path.parent.mkdir(parents=True, exist_ok=True)
+        dialogue_summary_path.parent.mkdir(parents=True, exist_ok=True)
         incoming = sum(
             1 for e in old_entries
             if str(e.get("direction", "")).lower() not in ("out", "outgoing")
@@ -234,6 +239,9 @@ class Memory:
         )
         with summary_path.open("a", encoding="utf-8") as f:
             f.write(summary_block)
+        # Canonical summary file consumed by context/consciousness.
+        with dialogue_summary_path.open("a", encoding="utf-8") as f:
+            f.write(summary_block)
 
         append_jsonl(self.logs_path("events.jsonl"), {
             "ts": utc_now_iso(),
@@ -244,6 +252,7 @@ class Memory:
             "outbound_count": outgoing,
             "archive_path": str(archive_path),
             "summary_path": str(summary_path),
+            "dialogue_summary_path": str(dialogue_summary_path),
         })
 
         return (
@@ -290,6 +299,58 @@ class Memory:
             log.info("Auto compacted chat history: %s", result)
         except Exception:
             log.warning("Auto chat history compaction failed", exc_info=True)
+
+    def ensure_chat_history_compacted_for_context(self) -> None:
+        """
+        Keep active chat history bounded before building LLM context.
+
+        Applies existing byte-based compaction plus an optional message-count cap
+        so context always carries "important memory + recent tail", not full chat.
+        """
+        self._maybe_auto_compact_history()
+
+        enabled = str(os.environ.get("OUROBOROS_CHAT_HISTORY_AUTO_SUMMARIZE", "true")).strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return
+
+        chat_path = self.logs_path("chat.jsonl")
+        if not chat_path.exists():
+            return
+
+        try:
+            max_active_messages = int(
+                str(os.environ.get("OUROBOROS_CHAT_HISTORY_MAX_ACTIVE_MESSAGES", "2500")).strip()
+            )
+        except (TypeError, ValueError):
+            max_active_messages = 2500
+        if max_active_messages <= 0:
+            return
+
+        try:
+            line_count = chat_path.read_bytes().count(b"\n")
+        except Exception:
+            log.debug("Failed to count chat.jsonl lines for context compaction", exc_info=True)
+            return
+
+        if line_count <= max_active_messages:
+            return
+
+        try:
+            keep_last_n = int(str(os.environ.get("OUROBOROS_CHAT_HISTORY_KEEP_LAST_N", "1000")).strip())
+        except (TypeError, ValueError):
+            keep_last_n = 1000
+        keep_last_n = max(1, min(keep_last_n, max_active_messages))
+
+        try:
+            result = self.summarize_old_history(keep_last_n=keep_last_n)
+            log.info(
+                "Context-driven chat compaction applied (line_count=%s, max_active_messages=%s): %s",
+                line_count,
+                max_active_messages,
+                result,
+            )
+        except Exception:
+            log.warning("Context-driven chat compaction failed", exc_info=True)
 
     def chat_history(self, count: int = 100, offset: int = 0, search: str = "") -> str:
         """Read from logs/chat.jsonl. count messages, offset from end, filter by search."""

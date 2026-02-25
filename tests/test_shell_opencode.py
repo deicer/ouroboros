@@ -161,6 +161,39 @@ def test_opencode_edit_large_prompt_fast_fails(tmp_path, monkeypatch):
     assert "1. Refactor block 1" in result
 
 
+def test_opencode_edit_offloads_heavy_direct_chat_to_worker(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", "1")
+    ctx = ToolContext(
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        is_direct_chat=True,
+        task_id="parent-1",
+    )
+
+    result = _opencode_edit(ctx, "Refactor the entire project architecture and split modules by responsibility.")
+
+    assert "HEAVY_OPENCODE_OFFLOADED" in result
+    assert any(e.get("type") == "schedule_task" for e in ctx.pending_events)
+    evt = next(e for e in ctx.pending_events if e.get("type") == "schedule_task")
+    assert evt.get("parent_task_id") == "parent-1"
+    assert "opencode_edit" in str(evt.get("context") or "")
+
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["tool"] == "opencode_edit"
+    assert last["route"] == "offload_to_worker"
+    assert last["ok"] is True
+
+
 def _read_jsonl(path: pathlib.Path) -> list[dict]:
     if not path.exists():
         return []
