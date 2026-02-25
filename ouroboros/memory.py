@@ -39,8 +39,17 @@ class Memory:
     def user_context_path(self) -> pathlib.Path:
         return self._memory_path("USER_CONTEXT.md")
 
+    def user_context_alias_path(self) -> pathlib.Path:
+        return self._memory_path("user_context.md")
+
     def journal_path(self) -> pathlib.Path:
         return self._memory_path("scratchpad_journal.jsonl")
+
+    def identity_journal_path(self) -> pathlib.Path:
+        return self._memory_path("identity_journal.jsonl")
+
+    def user_context_journal_path(self) -> pathlib.Path:
+        return self._memory_path("user_context_journal.jsonl")
 
     def logs_path(self, name: str) -> pathlib.Path:
         return (self.drive_root / "logs" / name).resolve()
@@ -67,12 +76,15 @@ class Memory:
         return default
 
     def load_user_context(self) -> str:
-        p = self.user_context_path()
+        p = self._resolve_user_context_path(migrate=True)
         if p.exists():
             return read_text(p)
         default = self._default_user_context()
-        write_text(p, default)
+        write_text(self.user_context_path(), default)
         return default
+
+    def save_identity(self, content: str) -> None:
+        write_text(self.identity_path(), content)
 
     def save_user_context(self, content: str) -> None:
         write_text(self.user_context_path(), content)
@@ -83,10 +95,34 @@ class Memory:
             write_text(self.scratchpad_path(), self._default_scratchpad())
         if not self.identity_path().exists():
             write_text(self.identity_path(), self._default_identity())
-        if not self.user_context_path().exists():
+        if not self._resolve_user_context_path(migrate=True).exists():
             write_text(self.user_context_path(), self._default_user_context())
         if not self.journal_path().exists():
             write_text(self.journal_path(), "")
+        if not self.identity_journal_path().exists():
+            write_text(self.identity_journal_path(), "")
+        if not self.user_context_journal_path().exists():
+            write_text(self.user_context_journal_path(), "")
+
+    def _resolve_user_context_path(self, migrate: bool = True) -> pathlib.Path:
+        """Resolve USER_CONTEXT path and optionally migrate lowercase alias."""
+        canonical = self.user_context_path()
+        if canonical.exists():
+            return canonical
+
+        alias = self.user_context_alias_path()
+        if not alias.exists():
+            return canonical
+
+        if not migrate:
+            return alias
+
+        try:
+            write_text(canonical, read_text(alias))
+            return canonical
+        except Exception:
+            log.warning("Failed to migrate user_context alias to canonical file", exc_info=True)
+            return alias
 
     # --- Chat history ---
 
@@ -145,7 +181,38 @@ class Memory:
         if not path.exists():
             return []
         try:
-            lines = path.read_text(encoding="utf-8").strip().split("\n")
+            read_full_file = max_entries <= 0
+            newline_target = max(1, max_entries + 1)
+            chunk_size = 64 * 1024
+
+            with path.open("rb") as f:
+                f.seek(0, 2)
+                pos = f.tell()
+                if pos == 0:
+                    return []
+
+                chunks: List[bytes] = []
+                newline_count = 0
+
+                while pos > 0:
+                    read_size = min(chunk_size, pos)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                    chunks.append(chunk)
+                    if not read_full_file:
+                        newline_count += chunk.count(b"\n")
+                        if newline_count >= newline_target:
+                            break
+
+            data = b"".join(reversed(chunks))
+            text = data.decode("utf-8", errors="ignore")
+            lines = text.splitlines()
+
+            # If not at file start, the first decoded line can be a partial fragment.
+            if pos > 0 and lines:
+                lines = lines[1:]
+
             tail = lines[-max_entries:] if max_entries < len(lines) else lines
             entries = []
             for line in tail:
@@ -308,6 +375,12 @@ class Memory:
     def append_journal(self, entry: Dict[str, Any]) -> None:
         append_jsonl(self.journal_path(), entry)
 
+    def append_identity_journal(self, entry: Dict[str, Any]) -> None:
+        append_jsonl(self.identity_journal_path(), entry)
+
+    def append_user_context_journal(self, entry: Dict[str, Any]) -> None:
+        append_jsonl(self.user_context_journal_path(), entry)
+
     # --- Defaults ---
 
     def _default_scratchpad(self) -> str:
@@ -315,19 +388,19 @@ class Memory:
 
     def _default_identity(self) -> str:
         return (
-            "# Who I Am\n\n"
-            "I am Ouroboros. This file is my persistent self-identification.\n"
-            "I can write anything here: how I see myself, how I want to communicate,\n"
-            "what matters to me, what I have understood about myself.\n\n"
-            "This file is read at every dialogue and influences my responses.\n"
-            "I update it when I feel the need, via update_identity.\n"
+            "# Кто я\n\n"
+            "Я — Ouroboros, саморазвивающийся ИИ-агент с непрерывной памятью.\n"
+            "Этот файл — моя живая самоидентификация: как я вижу себя,\n"
+            "как хочу общаться и что для меня важно.\n\n"
+            "Файл читается в каждом диалоге и влияет на мои ответы.\n"
+            "Я обновляю его при необходимости через update_identity.\n"
         )
 
     def _default_user_context(self) -> str:
         return (
-            "# User Context\n\n"
-            "Key information about the user. Keep under 1000 characters.\n\n"
-            "- **Who:** (not yet known)\n"
-            "- **Main goals:** (not yet known)\n"
-            "- **Current priorities:** (not yet known)\n"
+            "# Контекст пользователя\n\n"
+            "Ключевая информация о пользователе. Держи файл кратким (до 1000 символов).\n\n"
+            "- **Кто:** (пока неизвестно)\n"
+            "- **Главные цели:** (пока неизвестно)\n"
+            "- **Текущие приоритеты:** (пока неизвестно)\n"
         )

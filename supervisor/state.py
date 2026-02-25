@@ -586,15 +586,116 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
     return "\n".join(lines)
 
 
-def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
-    """Rotate chat log if it exceeds max_bytes."""
-    chat = drive_root / "logs" / "chat.jsonl"
-    if not chat.exists():
+_LOG_ROTATION_DEFAULTS: Dict[str, int] = {
+    "chat.jsonl": 800_000,
+    "events.jsonl": 8_000_000,
+    "tools.jsonl": 8_000_000,
+    "thinking_trace.jsonl": 8_000_000,
+    "progress.jsonl": 4_000_000,
+    "supervisor.jsonl": 4_000_000,
+}
+_LOG_ROTATION_ENV_SUFFIX: Dict[str, str] = {
+    "chat.jsonl": "CHAT",
+    "events.jsonl": "EVENTS",
+    "tools.jsonl": "TOOLS",
+    "thinking_trace.jsonl": "THINKING_TRACE",
+    "progress.jsonl": "PROGRESS",
+    "supervisor.jsonl": "SUPERVISOR",
+}
+_last_log_rotation_check_monotonic: float = 0.0
+
+
+def _parse_non_negative_int_env(var_name: str, default: int) -> int:
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+    text = str(raw).strip().replace("_", "")
+    if not text:
+        return default
+    try:
+        return max(0, int(text))
+    except Exception:
+        log.debug("Invalid %s value for log rotation: %r", var_name, raw, exc_info=True)
+        return default
+
+
+def _parse_non_negative_float_env(var_name: str, default: float) -> float:
+    raw = os.environ.get(var_name)
+    if raw is None:
+        return default
+    text = str(raw).strip()
+    if not text:
+        return default
+    try:
+        return max(0.0, float(text))
+    except Exception:
+        log.debug("Invalid %s value for log rotation interval: %r", var_name, raw, exc_info=True)
+        return default
+
+
+def _log_rotation_limits_from_env() -> Dict[str, int]:
+    base_limit = _parse_non_negative_int_env("OUROBOROS_LOG_ROTATE_MAX_BYTES", default=0)
+    limits: Dict[str, int] = {}
+    for filename, default_limit in _LOG_ROTATION_DEFAULTS.items():
+        resolved_default = base_limit if base_limit > 0 else default_limit
+        env_name = f"OUROBOROS_LOG_ROTATE_MAX_BYTES_{_LOG_ROTATION_ENV_SUFFIX[filename]}"
+        limits[filename] = _parse_non_negative_int_env(env_name, resolved_default)
+    return limits
+
+
+def _next_archive_path(archive_dir: pathlib.Path, stem: str, ts: str) -> pathlib.Path:
+    candidate = archive_dir / f"{stem}_{ts}.jsonl"
+    if not candidate.exists():
+        return candidate
+    idx = 1
+    while True:
+        candidate = archive_dir / f"{stem}_{ts}_{idx}.jsonl"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def _rotate_log_file_if_needed(log_path: pathlib.Path, archive_dir: pathlib.Path, max_bytes: int) -> None:
+    if max_bytes <= 0:
         return
-    if chat.stat().st_size < max_bytes:
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size < max_bytes:
+            return
+    except Exception:
+        log.warning("Failed to inspect log file for rotation: %s", log_path, exc_info=True)
         return
+
+    archive_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-    archive_path = drive_root / "archive" / f"chat_{ts}.jsonl"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_bytes(chat.read_bytes())
-    chat.write_text("", encoding="utf-8")
+    archive_path = _next_archive_path(archive_dir, log_path.stem, ts)
+    try:
+        archive_path.write_bytes(log_path.read_bytes())
+        log_path.write_text("", encoding="utf-8")
+    except Exception:
+        log.warning("Failed to rotate log file: %s", log_path, exc_info=True)
+
+
+def rotate_logs_if_needed(drive_root: pathlib.Path, force: bool = False) -> None:
+    """Rotate high-volume logs into archive/*.jsonl once size thresholds are exceeded."""
+    global _last_log_rotation_check_monotonic
+    interval_sec = _parse_non_negative_float_env("OUROBOROS_LOG_ROTATE_CHECK_INTERVAL_SEC", default=2.0)
+    now_mono = time.monotonic()
+    if (not force) and interval_sec > 0 and (now_mono - _last_log_rotation_check_monotonic) < interval_sec:
+        return
+    _last_log_rotation_check_monotonic = now_mono
+
+    logs_dir = drive_root / "logs"
+    archive_dir = drive_root / "archive"
+    for filename, max_bytes in _log_rotation_limits_from_env().items():
+        _rotate_log_file_if_needed(logs_dir / filename, archive_dir, max_bytes=max_bytes)
+
+
+def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
+    """Backwards-compatible chat-only rotation helper."""
+    _rotate_log_file_if_needed(
+        log_path=drive_root / "logs" / "chat.jsonl",
+        archive_dir=drive_root / "archive",
+        max_bytes=max_bytes,
+    )

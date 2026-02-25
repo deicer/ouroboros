@@ -112,6 +112,23 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     user_context_raw = memory.load_user_context()
     sections.append("## User Context\n\n" + clip_text(user_context_raw, 5000))
 
+    goals_path = memory.drive_root / "memory" / "goals.json"
+    if goals_path.exists():
+        goals_raw = read_text(goals_path)
+        if goals_raw.strip():
+            goals_text = goals_raw
+            try:
+                goals_data = json.loads(goals_raw)
+                if goals_data in (None, "", [], {}):
+                    goals_text = ""
+                else:
+                    goals_text = json.dumps(goals_data, ensure_ascii=False, indent=2)
+            except Exception:
+                log.debug("Failed to parse goals.json for context; using raw content", exc_info=True)
+
+            if goals_text.strip():
+                sections.append("## Goals\n\n" + clip_text(goals_text, 12000))
+
     # Dialogue summary (key moments from chat history)
     summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
     if summary_path.exists():

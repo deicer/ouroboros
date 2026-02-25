@@ -131,9 +131,14 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
 
 def _update_identity(ctx: ToolContext, content: str) -> str:
     """Update identity manifest (who you are, who you want to become)."""
-    path = ctx.drive_root / "memory" / "identity.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    from ouroboros.memory import Memory
+    mem = Memory(drive_root=ctx.drive_root)
+    mem.save_identity(content)
+    mem.append_identity_journal({
+        "ts": utc_now_iso(),
+        "content_len": len(content),
+        "preview": content[:500],
+    })
     return f"OK: identity updated ({len(content)} chars)"
 
 
@@ -142,6 +147,11 @@ def _update_user_context(ctx: ToolContext, content: str) -> str:
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.save_user_context(content)
+    mem.append_user_context_journal({
+        "ts": utc_now_iso(),
+        "content_len": len(content),
+        "preview": content[:500],
+    })
     warning = ""
     if len(content) > 1000:
         warning = f" WARNING: content is {len(content)} chars, Bible section 5 says keep under 1000."

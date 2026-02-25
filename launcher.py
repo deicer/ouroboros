@@ -182,7 +182,7 @@ os.environ["OUROBOROS_BRANCH_PREFIX"] = str(_BRANCH_PREFIX)
 # ----------------------------
 from supervisor.state import (
     init as state_init, load_state, save_state, append_jsonl,
-    update_budget_from_usage, status_text, rotate_chat_log_if_needed,
+    update_budget_from_usage, status_text, rotate_logs_if_needed,
     init_state,
 )
 state_init(DRIVE_ROOT)
@@ -614,7 +614,7 @@ except Exception as e:
 
 while True:
     loop_started_ts = time.time()
-    rotate_chat_log_if_needed(DRIVE_ROOT)
+    rotate_logs_if_needed(DRIVE_ROOT)
     ensure_workers_healthy()
 
     # Drain worker events
