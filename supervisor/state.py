@@ -13,7 +13,9 @@ import os
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from ouroboros.utils import append_jsonl  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -114,10 +116,6 @@ def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
         pass
 
 
-# Re-export append_jsonl from ouroboros.utils (single source of truth)
-from ouroboros.utils import append_jsonl  # noqa: F401
-
-
 # ---------------------------------------------------------------------------
 # State schema
 # ---------------------------------------------------------------------------
@@ -145,6 +143,8 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("initialized", False)
     st.setdefault("arch_review_index", 0)
     st.setdefault("arch_review_last_at", "")
+    st.setdefault("openrouter_last_check_at", "")
+    st.setdefault("openrouter_limit_remaining_updated_at", "")
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot",
                         "session_total_snapshot", "session_spent_snapshot",
@@ -219,13 +219,15 @@ def init_state() -> Dict[str, Any]:
         # Seed budget from OpenRouter API so limit_remaining is available immediately
         ground_truth = check_openrouter_ground_truth()
         if ground_truth is not None:
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             st["openrouter_total_usd"] = ground_truth["total_usd"]
             st["openrouter_daily_usd"] = ground_truth["daily_usd"]
             if "limit" in ground_truth:
                 st["openrouter_limit"] = ground_truth["limit"]
             if "limit_remaining" in ground_truth:
                 st["openrouter_limit_remaining"] = ground_truth["limit_remaining"]
-            st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                st["openrouter_limit_remaining_updated_at"] = now_iso
+            st["openrouter_last_check_at"] = now_iso
 
         _save_state_unlocked(st)
         return st
@@ -239,11 +241,94 @@ def init_state() -> Dict[str, Any]:
 EVOLUTION_BUDGET_RESERVE: float = 50.0  # Stop evolution when remaining < this
 
 
+def _parse_iso_utc(ts: Any) -> Optional[datetime.datetime]:
+    raw = str(ts or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _openrouter_budget_max_age_sec() -> int:
+    raw = str(os.environ.get("OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC", "1800")).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 1800
+    return max(60, value)
+
+
+def _is_openrouter_budget_stale(st: Dict[str, Any], max_age_sec: int) -> bool:
+    if st.get("openrouter_limit_remaining") is None:
+        return True
+    ts = st.get("openrouter_limit_remaining_updated_at") or st.get("openrouter_last_check_at")
+    parsed = _parse_iso_utc(ts)
+    if parsed is None:
+        return True
+    age_sec = (datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds()
+    return age_sec > float(max_age_sec)
+
+
+def refresh_openrouter_budget_if_stale(
+    max_age_sec: Optional[int] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """
+    Ensure OpenRouter budget snapshot is fresh enough for budget decisions.
+
+    Returns latest state snapshot (updated when refresh succeeds).
+    """
+    max_age = _openrouter_budget_max_age_sec() if max_age_sec is None else max(60, int(max_age_sec))
+
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+    if not force and not _is_openrouter_budget_stale(st, max_age):
+        return st
+
+    ground_truth = check_openrouter_ground_truth()
+    if ground_truth is None:
+        return st
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        st["openrouter_total_usd"] = ground_truth["total_usd"]
+        st["openrouter_daily_usd"] = ground_truth["daily_usd"]
+        if "limit" in ground_truth:
+            st["openrouter_limit"] = ground_truth["limit"]
+        if "limit_remaining" in ground_truth:
+            st["openrouter_limit_remaining"] = ground_truth["limit_remaining"]
+            st["openrouter_limit_remaining_updated_at"] = now_iso
+        st["openrouter_last_check_at"] = now_iso
+        _save_state_unlocked(st)
+        return st
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
 def openrouter_budget_remaining(st: Dict[str, Any]) -> float:
     """Return remaining budget from OpenRouter API (single source of truth).
 
     Returns float('inf') if OpenRouter limit not yet fetched.
     """
+    max_age_sec = _openrouter_budget_max_age_sec()
+    if _is_openrouter_budget_stale(st, max_age_sec):
+        try:
+            st = refresh_openrouter_budget_if_stale(max_age_sec=max_age_sec, force=True)
+        except Exception:
+            log.warning("Failed to refresh stale OpenRouter budget snapshot", exc_info=True)
     or_remaining = st.get("openrouter_limit_remaining")
     if or_remaining is not None:
         return float(or_remaining)
@@ -336,6 +421,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
         if ground_truth is not None:
             lock_fd = acquire_file_lock(STATE_LOCK_PATH)
             try:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 st = _load_state_unlocked()
                 st["openrouter_total_usd"] = ground_truth["total_usd"]
                 st["openrouter_daily_usd"] = ground_truth["daily_usd"]
@@ -343,7 +429,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                     st["openrouter_limit"] = ground_truth["limit"]
                 if "limit_remaining" in ground_truth:
                     st["openrouter_limit_remaining"] = ground_truth["limit_remaining"]
-                st["openrouter_last_check_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    st["openrouter_limit_remaining_updated_at"] = now_iso
+                st["openrouter_last_check_at"] = now_iso
                 _save_state_unlocked(st)
             finally:
                 release_file_lock(STATE_LOCK_PATH, lock_fd)

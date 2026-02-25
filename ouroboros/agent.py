@@ -23,8 +23,8 @@ log = logging.getLogger(__name__)
 
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl,
-    safe_relpath, truncate_for_log,
-    get_git_info, sanitize_task_for_event, get_budget_remaining,
+    truncate_for_log,
+    get_git_info, sanitize_task_for_event, get_budget_remaining, safe_resolve_under_root,
 )
 from ouroboros.llm import LLMClient, add_usage
 from ouroboros.tools import ToolRegistry
@@ -52,10 +52,10 @@ class Env:
     branch_dev: str = field(default_factory=lambda: os.environ.get("OUROBOROS_BRANCH_PREFIX", "ouroboros"))
 
     def repo_path(self, rel: str) -> pathlib.Path:
-        return (self.repo_dir / safe_relpath(rel)).resolve()
+        return safe_resolve_under_root(self.repo_dir, rel)
 
     def drive_path(self, rel: str) -> pathlib.Path:
-        return (self.drive_root / safe_relpath(rel)).resolve()
+        return safe_resolve_under_root(self.drive_root, rel)
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +266,7 @@ class OuroborosAgent:
     def _check_budget(self) -> Tuple[dict, int]:
         """Check budget remaining with warning thresholds (OpenRouter SSOT)."""
         try:
-            state_path = self.env.drive_path("state") / "state.json"
-            state_data = json.loads(read_text(state_path))
+            state_data = self._load_budget_state_fresh()
 
             remaining = get_budget_remaining(state_data)
             if remaining is None:
@@ -297,6 +296,16 @@ class OuroborosAgent:
             }, issues
         except Exception as e:
             return {"status": "error", "error": str(e)}, 0
+
+    def _load_budget_state_fresh(self) -> Dict[str, Any]:
+        """Load state and refresh stale OpenRouter budget snapshot when needed."""
+        try:
+            from supervisor.state import refresh_openrouter_budget_if_stale
+            return refresh_openrouter_budget_if_stale()
+        except Exception:
+            log.debug("Failed to refresh OpenRouter budget snapshot; using local state", exc_info=True)
+            state_path = self.env.drive_path("state") / "state.json"
+            return json.loads(read_text(state_path))
 
     def _verify_system_state(self, git_sha: str) -> None:
         """Bible Principle 1: verify system state on every startup.
@@ -383,8 +392,7 @@ class OuroborosAgent:
         # Read budget remaining for cost guard (OpenRouter limit_remaining is SSOT)
         budget_remaining = None
         try:
-            state_path = self.env.drive_path("state") / "state.json"
-            state_data = json.loads(read_text(state_path))
+            state_data = self._load_budget_state_fresh()
             budget_remaining = get_budget_remaining(state_data)
         except Exception:
             pass
