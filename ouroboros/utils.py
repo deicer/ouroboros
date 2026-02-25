@@ -11,13 +11,30 @@ import datetime as _dt
 import hashlib
 import json
 import logging
-import os
 import pathlib
+import re as _re
 import subprocess
-import time
+import threading
+import urllib.parse as _urlparse
 from typing import Any, Dict, List, Optional
 
+try:
+    import fcntl as _fcntl  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - non-POSIX fallback
+    _fcntl = None
+
 log = logging.getLogger(__name__)
+_TIKTOKEN_ENCODER = None
+_TIKTOKEN_UNAVAILABLE = False
+_APPEND_JSONL_LOCKS: Dict[str, threading.Lock] = {}
+_APPEND_JSONL_LOCKS_GUARD = threading.Lock()
+_APPEND_JSONL_STATS: Dict[str, int] = {
+    "calls": 0,
+    "contention": 0,
+    "errors": 0,
+    "flock_unavailable": 0,
+}
+_APPEND_JSONL_STATS_GUARD = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -49,79 +66,48 @@ def write_text(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _append_jsonl_path_lock(path: pathlib.Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _APPEND_JSONL_LOCKS_GUARD:
+        lock = _APPEND_JSONL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _APPEND_JSONL_LOCKS[key] = lock
+    return lock
+
+
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
-    """Append a JSON object as a line to a JSONL file (concurrent-safe)."""
+    """Append a JSON object to a JSONL file (thread/process-safe on Linux)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(obj, ensure_ascii=False)
-    data = (line + "\n").encode("utf-8")
+    payload = json.dumps(obj, ensure_ascii=False) + "\n"
 
-    lock_timeout_sec = 2.0
-    lock_stale_sec = 10.0
-    lock_sleep_sec = 0.01
-    write_retries = 3
-    retry_sleep_base_sec = 0.01
+    with _APPEND_JSONL_STATS_GUARD:
+        _APPEND_JSONL_STATS["calls"] += 1
 
-    path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
-    lock_path = path.parent / f".append_jsonl_{path_hash}.lock"
-    lock_fd = None
-    lock_acquired = False
-
+    path_lock = _append_jsonl_path_lock(path)
+    if not path_lock.acquire(blocking=False):
+        with _APPEND_JSONL_STATS_GUARD:
+            _APPEND_JSONL_STATS["contention"] += 1
+        path_lock.acquire()
     try:
-        start = time.time()
-        while time.time() - start < lock_timeout_sec:
+        with path.open("a", encoding="utf-8") as f:
+            if _fcntl is not None:
+                _fcntl.flock(f.fileno(), _fcntl.LOCK_EX)
+            else:
+                with _APPEND_JSONL_STATS_GUARD:
+                    _APPEND_JSONL_STATS["flock_unavailable"] += 1
             try:
-                lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                lock_acquired = True
-                break
-            except FileExistsError:
-                try:
-                    stat = lock_path.stat()
-                    if time.time() - stat.st_mtime > lock_stale_sec:
-                        lock_path.unlink()
-                        continue
-                except Exception:
-                    log.debug("Failed to read lock stat during lock acquisition retry", exc_info=True)
-                    pass
-                time.sleep(lock_sleep_sec)
-            except Exception:
-                log.debug("Failed to acquire file lock for jsonl append", exc_info=True)
-                break
-
-        for attempt in range(write_retries):
-            try:
-                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-                try:
-                    os.write(fd, data)
-                finally:
-                    os.close(fd)
-                return
-            except Exception:
-                if attempt < write_retries - 1:
-                    time.sleep(retry_sleep_base_sec * (2 ** attempt))
-
-        for attempt in range(write_retries):
-            try:
-                with path.open("a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-                return
-            except Exception:
-                if attempt < write_retries - 1:
-                    time.sleep(retry_sleep_base_sec * (2 ** attempt))
+                f.write(payload)
+                f.flush()
+            finally:
+                if _fcntl is not None:
+                    _fcntl.flock(f.fileno(), _fcntl.LOCK_UN)
     except Exception:
-        log.warning("append_jsonl: all write attempts failed for %s", path, exc_info=True)
+        with _APPEND_JSONL_STATS_GUARD:
+            _APPEND_JSONL_STATS["errors"] += 1
+        log.warning("append_jsonl: write failed for %s", path, exc_info=True)
     finally:
-        if lock_fd is not None:
-            try:
-                os.close(lock_fd)
-            except Exception:
-                log.debug("Failed to close lock fd after jsonl append", exc_info=True)
-                pass
-        if lock_acquired:
-            try:
-                lock_path.unlink()
-            except Exception:
-                log.debug("Failed to unlink lock file after jsonl append", exc_info=True)
-                pass
+        path_lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -129,10 +115,39 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def safe_relpath(p: str) -> str:
-    p = p.replace("\\", "/").lstrip("/")
-    if ".." in pathlib.PurePosixPath(p).parts:
+    raw = str(p or "")
+    # Decode once/twice to catch encoded traversal patterns like %2e%2e.
+    decoded = raw
+    for _ in range(3):
+        next_decoded = _urlparse.unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+
+    if "\x00" in decoded:
+        raise ValueError("NUL byte in path is not allowed.")
+
+    normalized = decoded.replace("\\", "/").lstrip("/")
+    pp = pathlib.PurePosixPath(normalized)
+    if ".." in pp.parts:
         raise ValueError("Path traversal is not allowed.")
-    return p
+    if pp.parts and _re.match(r"^[A-Za-z]:$", pp.parts[0] or ""):
+        raise ValueError("Drive-letter paths are not allowed.")
+    parts = [part for part in pp.parts if part not in ("", ".")]
+    return "/".join(parts)
+
+
+def safe_resolve_under_root(root: pathlib.Path, rel: str) -> pathlib.Path:
+    """
+    Resolve a user-provided relative path under root and enforce confinement.
+
+    Protects against traversal via '..', URL encoding and symlink escape.
+    """
+    root_resolved = root.resolve()
+    candidate = (root_resolved / safe_relpath(rel)).resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise ValueError("Resolved path escapes allowed root.")
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +172,38 @@ def short(s: Any, n: int = 120) -> str:
     return t[:n] + "..." if len(t) > n else t
 
 
+def _get_tiktoken_encoder():
+    """Best-effort cached tiktoken encoder; returns None when unavailable."""
+    global _TIKTOKEN_ENCODER, _TIKTOKEN_UNAVAILABLE
+    if _TIKTOKEN_ENCODER is not None:
+        return _TIKTOKEN_ENCODER
+    if _TIKTOKEN_UNAVAILABLE:
+        return None
+    try:
+        import tiktoken  # type: ignore
+
+        _TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        return _TIKTOKEN_ENCODER
+    except Exception:
+        _TIKTOKEN_UNAVAILABLE = True
+        return None
+
+
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate (chars/4 heuristic)."""
-    return max(1, (len(str(text or "")) + 3) // 4)
+    """Estimate tokens with tiktoken when available, else UTF-8 heuristic."""
+    s = str(text or "")
+    if not s:
+        return 1
+
+    enc = _get_tiktoken_encoder()
+    if enc is not None:
+        try:
+            return max(1, len(enc.encode(s)))
+        except Exception:
+            log.debug("tiktoken encode failed in estimate_tokens; falling back to utf-8 heuristic", exc_info=True)
+
+    # Better approximation for Cyrillic/non-ASCII than chars/4.
+    return max(1, (len(s.encode("utf-8")) + 2) // 3)
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +304,6 @@ _SECRET_KEYS = frozenset([
 ])
 
 # Patterns that indicate leaked secrets in tool output
-import re as _re
 _SECRET_PATTERNS = _re.compile(
     r'ghp_[A-Za-z0-9]{30,}'       # GitHub personal access token
     r'|sk-ant-[A-Za-z0-9\-]{30,}' # Anthropic API key

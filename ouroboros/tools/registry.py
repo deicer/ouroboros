@@ -7,13 +7,15 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
-import json
+import importlib
+import logging
 import os
 import pathlib
+import pkgutil
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros.utils import safe_relpath
+from ouroboros.utils import safe_resolve_under_root
 
 
 @dataclass
@@ -57,10 +59,10 @@ class ToolContext:
     is_direct_chat: bool = False
 
     def repo_path(self, rel: str) -> pathlib.Path:
-        return (self.repo_dir / safe_relpath(rel)).resolve()
+        return safe_resolve_under_root(self.repo_dir, rel)
 
     def drive_path(self, rel: str) -> pathlib.Path:
-        return (self.drive_root / safe_relpath(rel)).resolve()
+        return safe_resolve_under_root(self.drive_root, rel)
 
     def drive_logs(self) -> pathlib.Path:
         return (self.drive_root / "logs").resolve()
@@ -106,8 +108,6 @@ class ToolRegistry:
 
     def _load_modules(self) -> None:
         """Auto-discover tool modules in ouroboros/tools/ that export get_tools()."""
-        import importlib
-        import pkgutil
         import ouroboros.tools as tools_pkg
         for _importer, modname, _ispkg in pkgutil.iter_modules(tools_pkg.__path__):
             if modname.startswith("_") or modname == "registry":
@@ -118,7 +118,6 @@ class ToolRegistry:
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
             except Exception:
-                import logging
                 logging.getLogger(__name__).warning(
                     "Failed to load tool module %s", modname, exc_info=True)
 
