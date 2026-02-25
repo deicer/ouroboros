@@ -60,6 +60,8 @@ requests==2.32.5
     # via
     #   ouroboros (pyproject.toml)
     #   tiktoken
+ruff==0.15.2
+    # via ouroboros (pyproject.toml)
 sniffio==1.3.1
     # via openai
 tiktoken==0.12.0
