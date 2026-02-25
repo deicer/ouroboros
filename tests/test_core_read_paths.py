@@ -1,7 +1,7 @@
 import pathlib
 import tempfile
 
-from ouroboros.tools.core import _drive_read, _repo_read
+from ouroboros.tools.core import _drive_read, _drive_write, _repo_read
 from ouroboros.tools.registry import ToolContext
 
 
@@ -90,3 +90,20 @@ def test_repo_read_relative_loop_path_maps_to_ouroboros_package():
         ctx = _mk_ctx(repo, drive)
         out = _repo_read(ctx, "loop.py")
         assert "print('loop')" in out
+
+
+def test_drive_write_absolute_data_path_writes_under_drive_root():
+    with tempfile.TemporaryDirectory() as td:
+        repo = pathlib.Path(td) / "repo"
+        drive = pathlib.Path(td) / "data"
+        repo.mkdir(parents=True, exist_ok=True)
+        drive.mkdir(parents=True, exist_ok=True)
+
+        ctx = _mk_ctx(repo, drive)
+        target = drive / "memory" / "goals.json"
+        out = _drive_write(ctx, "/data/memory/goals.json", "[]", mode="overwrite")
+
+        assert out.startswith("OK: wrote overwrite")
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == "[]"
+        assert not (drive / "data" / "memory" / "goals.json").exists()

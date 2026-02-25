@@ -57,6 +57,33 @@ def _resolve_read_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
     raise ValueError(f"path outside allowed root: {p}")
 
 
+def _resolve_write_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
+    """Resolve write path while supporting absolute /data/... compatibility."""
+    p = str(raw_path or "").strip()
+    if not p:
+        raise ValueError("path must not be empty")
+
+    root_resolved = root.resolve()
+    if pathlib.Path(p).is_absolute():
+        abs_candidate = pathlib.Path(p).resolve()
+        if abs_candidate == root_resolved or root_resolved in abs_candidate.parents:
+            return abs_candidate
+
+        # Legacy compatibility: /data/<...> should map under DRIVE_ROOT, not DRIVE_ROOT/data/<...>
+        if p.startswith("/data/"):
+            rel = safe_relpath(p[len("/data/"):])
+            mapped = (root_resolved / rel).resolve()
+            if mapped == root_resolved or root_resolved in mapped.parents:
+                return mapped
+        raise ValueError(f"path outside allowed root: {p}")
+
+    rel = safe_relpath(p)
+    mapped = (root_resolved / rel).resolve()
+    if mapped == root_resolved or root_resolved in mapped.parents:
+        return mapped
+    raise ValueError(f"path outside allowed root: {p}")
+
+
 def _apply_read_limit(text: str, limit: int | None) -> str:
     """Apply optional character limit to read output for compatibility with legacy callers."""
     try:
@@ -126,7 +153,10 @@ def _drive_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str
 
 
 def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwrite") -> str:
-    p = ctx.drive_path(path)
+    try:
+        p = _resolve_write_path(ctx.drive_root, path)
+    except Exception as e:
+        return f"⚠️ PATH_ERROR: {e}"
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         p.write_text(content, encoding="utf-8")
