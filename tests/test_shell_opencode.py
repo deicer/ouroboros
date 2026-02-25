@@ -33,6 +33,26 @@ def test_opencode_no_changes_detected():
     assert _opencode_no_changes_detected("Updated 1 file", "") is False
 
 
+def test_opencode_fallback_models_use_only_opencode_env(monkeypatch):
+    from ouroboros.tools.shell import _opencode_fallback_models
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
+    monkeypatch.setenv(
+        "OUROBOROS_MODEL_FREE_LIST",
+        "arcee-ai/trinity-large-preview:free,stepfun/step-3.5-flash:free",
+    )
+    assert _opencode_fallback_models() == []
+
+    monkeypatch.setenv(
+        "OUROBOROS_OPENCODE_FALLBACK_MODELS",
+        "opencode/minimax-m2.5-free, opencode/trinity-large-preview-free, opencode/minimax-m2.5-free",
+    )
+    assert _opencode_fallback_models() == [
+        "opencode/minimax-m2.5-free",
+        "opencode/trinity-large-preview-free",
+    ]
+
+
 def test_opencode_prompt_too_large_and_step_extraction(monkeypatch):
     from ouroboros.tools.shell import _extract_atomic_steps, _opencode_prompt_too_large
 

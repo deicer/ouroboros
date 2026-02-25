@@ -320,9 +320,6 @@ def _is_copilot_reauth_error(stdout: str, stderr: str) -> bool:
 def _opencode_fallback_models() -> List[str]:
     raw = os.environ.get("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
     models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
-    if not models:
-        free_raw = os.environ.get("OUROBOROS_MODEL_FREE_LIST", "")
-        models = [m.strip() for m in free_raw.split(",") if m.strip()] if free_raw else []
     # stable dedup preserving order
     dedup: List[str] = []
     seen = set()
