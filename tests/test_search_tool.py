@@ -40,6 +40,7 @@ def test_web_search_tavily_request_payload(monkeypatch):
         })
 
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test-key")
+    monkeypatch.setenv("OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT", "false")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr("ouroboros.tools.search.urllib.request.urlopen", fake_urlopen)
 
@@ -69,6 +70,7 @@ def test_web_search_tavily_request_payload(monkeypatch):
     assert captured["payload"]["include_domains"] == ["docs.tavily.com"]
     assert captured["payload"]["exclude_domains"] == ["spam.example"]
     assert captured["payload"]["include_images"] is True
+    assert captured["payload"]["include_raw_content"] is False
     assert captured["payload"]["auto_parameters"] is True
     assert captured["payload"]["chunks_per_source"] == 2
 

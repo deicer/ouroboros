@@ -55,6 +55,34 @@ def _to_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(max_value, v))
 
 
+def _normalize_include_answer(value: Any) -> Any:
+    if value is None:
+        return "basic"
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in {"basic", "advanced"}:
+        return s
+    b = _parse_boolish(s)
+    if b is not None:
+        return b
+    return "basic"
+
+
+def _normalize_include_raw_content(value: Any) -> Any:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in {"markdown", "text"}:
+        return s
+    b = _parse_boolish(s)
+    if b is not None:
+        return b
+    return False
+
+
 def _tavily_search(
     query: str,
     api_key: str,
@@ -83,10 +111,12 @@ def _tavily_search(
     final_max_results = _to_int(max_results, default=env_max, min_value=0, max_value=20)
     final_search_depth = (search_depth or os.environ.get("OUROBOROS_TAVILY_SEARCH_DEPTH", "basic") or "basic").strip()
     final_topic = (topic or os.environ.get("OUROBOROS_TAVILY_TOPIC", "general") or "general").strip()
-    final_include_answer = (include_answer or os.environ.get("OUROBOROS_TAVILY_INCLUDE_ANSWER", "basic") or "basic").strip()
-    final_include_raw_content = (
+    raw_include_answer = include_answer or os.environ.get("OUROBOROS_TAVILY_INCLUDE_ANSWER", "basic") or "basic"
+    raw_include_raw_content = (
         include_raw_content or os.environ.get("OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT", "false") or "false"
-    ).strip()
+    )
+    final_include_answer = _normalize_include_answer(raw_include_answer)
+    final_include_raw_content = _normalize_include_raw_content(raw_include_raw_content)
 
     include_domains_list = _to_str_list(include_domains)
     exclude_domains_list = _to_str_list(exclude_domains)
