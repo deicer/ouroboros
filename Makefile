@@ -1,7 +1,7 @@
 # Ouroboros — common development commands
 # Usage: make test, make lint, make health
 
-.PHONY: test test-v test-e2e health clean
+.PHONY: test test-v test-e2e health deps-lock clean
 
 # Run smoke tests (fast, no external deps needed at runtime)
 test:
@@ -29,6 +29,11 @@ test-e2e:
 		-e GITHUB_REPO=dummy \
 		-e TELEGRAM_BOT_TOKEN=dummy \
 		ouroboros-e2e
+
+# Compile lockfiles from pyproject.toml
+deps-lock:
+	python3 -m piptools compile pyproject.toml --strip-extras --output-file requirements.txt
+	python3 -m piptools compile pyproject.toml --strip-extras --extra dev --output-file requirements-dev.txt
 
 # Clean Python cache files
 clean:

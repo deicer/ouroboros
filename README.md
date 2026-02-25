@@ -135,6 +135,23 @@ You should see: `Owner registered. Ouroboros online.`
 
 The container auto-restarts on failure. Use `/restart` in Telegram for soft restart, `/panic` to hard stop. All state persists in a Docker volume -- survives restarts and rebuilds.
 
+### Dependency Management (pyproject-first)
+
+Runtime and dev dependencies are defined in `pyproject.toml`.
+`requirements.txt` and `requirements-dev.txt` are generated lockfiles:
+
+```bash
+python3 -m pip install --user pip-tools
+make deps-lock
+```
+
+Install locally:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements-dev.txt
+```
+
 ### OpenCode Quick Check
 
 If code editing fails, run:
@@ -234,9 +251,12 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT` | `false` | Tavily raw content mode (`false`,`true`,`text`,`markdown`) |
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
+| `OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC` | `1800` | Max age (seconds) for `openrouter_limit_remaining` before forced OpenRouter refresh |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
 | `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
 | `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
+| `OUROBOROS_RUN_SHELL_TIMEOUT_SEC` | `120` | Timeout (seconds) for `run_shell` subprocess |
+| `OUROBOROS_RUN_SHELL_MAX_OUTPUT_BYTES` | `100000` | Max combined stdout/stderr size returned by `run_shell` |
 | `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Legacy fallback list (used when paid/free priority lists are not set) |
 
 ---
