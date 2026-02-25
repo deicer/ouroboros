@@ -113,6 +113,8 @@ EXPECTED_TOOLS = [
     "forward_to_worker",
     # Context management
     "compact_context",
+    # External wrappers
+    "whisper_transcriber",
     "list_available_tools",
     "enable_tools",
 ]

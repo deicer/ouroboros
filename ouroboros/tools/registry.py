@@ -7,6 +7,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -105,7 +106,7 @@ class ToolRegistry:
         self._load_modules()
 
     def _load_modules(self) -> None:
-        """Auto-discover tool modules in ouroboros/tools/ that export get_tools()."""
+        """Auto-discover tool modules in package and optional external tools dir."""
         import importlib
         import pkgutil
         import ouroboros.tools as tools_pkg
@@ -121,6 +122,33 @@ class ToolRegistry:
                 import logging
                 logging.getLogger(__name__).warning(
                     "Failed to load tool module %s", modname, exc_info=True)
+        self._load_external_modules()
+
+    def _load_external_modules(self) -> None:
+        """Load external tool modules from OUROBOROS_EXTERNAL_TOOLS_DIR (default: /app/tools)."""
+        import logging
+
+        ext_dir = pathlib.Path(os.environ.get("OUROBOROS_EXTERNAL_TOOLS_DIR", "/app/tools"))
+        if not ext_dir.exists() or not ext_dir.is_dir():
+            return
+
+        for file in sorted(ext_dir.glob("*.py")):
+            stem = file.stem
+            if stem.startswith("_"):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(f"ouroboros_external_{stem}", str(file))
+                if spec is None or spec.loader is None:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)  # type: ignore[union-attr]
+                if hasattr(mod, "get_tools"):
+                    for entry in mod.get_tools():
+                        self._entries[entry.name] = entry
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Failed to load external tool module %s", file, exc_info=True
+                )
 
     def set_context(self, ctx: ToolContext) -> None:
         self._ctx = ctx
