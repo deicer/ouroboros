@@ -52,6 +52,7 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
     lock_path = lock_dir / "git.lock"
     stale_sec = 600
     legacy_stale_sec = int(os.environ.get("OUROBOROS_GIT_LOCK_LEGACY_STALE_SEC", "120") or "120")
+    same_pid_stale_sec = int(os.environ.get("OUROBOROS_GIT_LOCK_SAME_PID_STALE_SEC", "180") or "180")
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if lock_path.exists():
@@ -62,6 +63,10 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
                 pid = int(pid_raw) if pid_raw.isdigit() else 0
                 # If lock owner process is dead, treat lock as stale immediately.
                 if pid and not _pid_is_alive(pid):
+                    lock_path.unlink()
+                    continue
+                # If lock belongs to this process for too long, assume stuck worker thread.
+                if pid and pid == os.getpid() and age > same_pid_stale_sec:
                     lock_path.unlink()
                     continue
                 # Legacy lock format (no pid) uses a shorter stale timeout to recover
@@ -81,6 +86,7 @@ def _acquire_git_lock(ctx: ToolContext, timeout_sec: int = 120) -> pathlib.Path:
                 payload = (
                     f"locked_at={utc_now_iso()}\n"
                     f"pid={os.getpid()}\n"
+                    f"task_id={ctx.task_id or ''}\n"
                 )
                 os.write(fd, payload.encode("utf-8"))
             finally:

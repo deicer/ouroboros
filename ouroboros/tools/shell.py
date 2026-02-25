@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -104,6 +105,7 @@ def _run_opencode_cli(
     prompt: str,
     env: dict,
     model: str = "",
+    timeout_sec: int = 120,
 ) -> subprocess.CompletedProcess:
     """Run OpenCode in non-interactive mode and return subprocess result."""
     cmd = _build_opencode_cmd(prompt=prompt, model=model)
@@ -112,7 +114,7 @@ def _run_opencode_cli(
         cwd=work_dir,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=max(15, int(timeout_sec)),
         env=env,
     )
 
@@ -381,17 +383,28 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
-        max_retries = max(1, int(os.environ.get("OUROBOROS_OPENCODE_MAX_RETRIES", "2") or "2"))
+        max_retries = max(1, int(os.environ.get("OUROBOROS_OPENCODE_MAX_RETRIES", "1") or "1"))
+        # Keep this below tool timeout_sec (300) to guarantee lock release in finally.
+        total_budget_sec = max(60, int(os.environ.get("OUROBOROS_OPENCODE_TOTAL_BUDGET_SEC", "260") or "260"))
+        per_attempt_timeout_sec = max(20, int(os.environ.get("OUROBOROS_OPENCODE_ATTEMPT_TIMEOUT_SEC", "90") or "90"))
+        deadline = time.monotonic() + total_budget_sec
         model_attempts: List[str] = [""] + _opencode_fallback_models()
         res = None
         stdout = ""
         stderr = ""
         failed = True
         attempt_notes: List[str] = []
+        budget_exhausted = False
 
         for model in model_attempts:
             model_label = model or "default"
             for attempt in range(1, max_retries + 1):
+                remaining = int(deadline - time.monotonic())
+                if remaining <= 15:
+                    budget_exhausted = True
+                    attempt_notes.append(f"{model_label}#{attempt}:budget_exhausted")
+                    break
+                effective_timeout = min(per_attempt_timeout_sec, max(15, remaining - 5))
                 if model:
                     ctx.emit_progress_fn(
                         f"OpenCode retry with {model_label} (attempt {attempt}/{max_retries})..."
@@ -402,6 +415,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                         prompt=full_prompt,
                         env=env,
                         model=model,
+                        timeout_sec=effective_timeout,
                     )
                     cur_stdout = (cur_res.stdout or "").strip()
                     cur_stderr = (cur_res.stderr or "").strip()
@@ -421,7 +435,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
                     reason = "copilot_auth" if _is_copilot_reauth_error(cur_stdout, cur_stderr) else "tool_or_provider_error"
                     attempt_notes.append(
-                        f"{model_label}#{attempt}:{reason}:exit={cur_res.returncode}"
+                        f"{model_label}#{attempt}:{reason}:exit={cur_res.returncode}:t={effective_timeout}s"
                     )
                     stdout = cur_stdout
                     stderr = cur_stderr
@@ -431,7 +445,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                     timeout_stderr = (te.stderr or "").strip() if isinstance(te.stderr, str) else ""
                     if _opencode_no_changes_detected(timeout_stdout, timeout_stderr):
                         return "ℹ️ OpenCode: no changes to apply (target state already reached)."
-                    attempt_notes.append(f"{model_label}#{attempt}:timeout")
+                    attempt_notes.append(f"{model_label}#{attempt}:timeout:{effective_timeout}s")
                     stdout = timeout_stdout
                     stderr = timeout_stderr
                     res = subprocess.CompletedProcess(
@@ -453,8 +467,16 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
             if not failed:
                 break
+            if budget_exhausted:
+                break
 
         if failed:
+            budget_note = ""
+            if budget_exhausted:
+                budget_note = (
+                    f"\nBudget limit reached: OUROBOROS_OPENCODE_TOTAL_BUDGET_SEC={total_budget_sec}, "
+                    f"OUROBOROS_OPENCODE_ATTEMPT_TIMEOUT_SEC={per_attempt_timeout_sec}."
+                )
             help_text = (
                 "\n\nTroubleshooting:\n"
                 "1) Ensure /app/opencode.json exists with provider 'opencode' and free model defaults.\n"
@@ -465,7 +487,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             return (
                 f"⚠️ OPENCODE_ERROR: exit={res.returncode if res is not None else 'n/a'}\n"
                 f"Attempts: {attempts_text}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-                f"{help_text}"
+                f"{budget_note}{help_text}"
             )
         if not stdout:
             stdout = "OK: OpenCode completed with empty output."
