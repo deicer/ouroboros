@@ -157,12 +157,10 @@ def _page_html() -> str:
       border-radius: 12px;
       background: var(--card);
       padding: 12px;
-      animation: in .22s ease-out;
     }
     .item.consciousness { border-left-color: #0891b2; }
     .item.task_loop { border-left-color: #0f766e; }
     .item.review { border-left-color: #7c3aed; }
-    @keyframes in { from { transform: translateY(6px); opacity: .2; } to { transform: none; opacity: 1; } }
     .head { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     .badge {
       font-size: 11px;
@@ -244,7 +242,10 @@ def _page_html() -> str:
       seen: new Set(),
       supervisor: {},
       error: "",
-      limit: 200
+      limit: 200,
+      lastListHtml: "",
+      lastSourcesSig: "",
+      lastSupervisorSig: ""
     };
 
     function esc(s) {
@@ -266,15 +267,20 @@ def _page_html() -> str:
     function updateSourceOptions() {
       const seen = new Set([""]);
       for (const e of state.entries) seen.add(e.source || "");
+      const values = [...seen].sort();
+      const sig = values.join("|");
+      if (sig === state.lastSourcesSig) return;
+      state.lastSourcesSig = sig;
+
       const selected = sourceFilter.value;
       sourceFilter.innerHTML = "";
-      [...seen].sort().forEach(v => {
+      values.forEach(v => {
         const opt = document.createElement("option");
         opt.value = v;
         opt.textContent = v ? `source: ${v}` : "Все source";
         sourceFilter.appendChild(opt);
       });
-      sourceFilter.value = selected;
+      sourceFilter.value = values.includes(selected) ? selected : "";
     }
 
     function matchFilters(e) {
@@ -303,7 +309,7 @@ def _page_html() -> str:
       const errorChip = state.error
         ? `<span class="chip warn">api: ${esc(state.error)}</span>`
         : `<span class="chip ok">api: ok</span>`;
-      chipsEl.innerHTML = `
+      const html = `
         <span class="chip ${ok ? "ok" : "warn"}">workers: ${alive}/${total}</span>
         <span class="chip">running: ${running}</span>
         <span class="chip">pending: ${pending}</span>
@@ -311,19 +317,32 @@ def _page_html() -> str:
         <span class="chip">spent: ${spent == null ? "n/a" : "$" + Number(spent).toFixed(3)}</span>
         ${errorChip}
       `;
+      if (chipsEl.innerHTML !== html) chipsEl.innerHTML = html;
+    }
+
+    function captureOpenKeys() {
+      const openKeys = new Set();
+      for (const details of listEl.querySelectorAll("details[open]")) {
+        const item = details.closest("article[data-entry-key]");
+        const key = item ? item.getAttribute("data-entry-key") : "";
+        if (key) openKeys.add(key);
+      }
+      return openKeys;
     }
 
     function render() {
+      const openKeys = captureOpenKeys();
       const items = state.entries.filter(matchFilters).slice().reverse();
       const html = items.map((e) => {
         const d = e.details || {};
         const preview = selectPreview(d);
         const klass = esc(e.source || "unknown");
+        const key = entryKey(e);
         const round = d.round || e.round || "";
         const taskId = d.task_id || e.task_id || "";
         const tool = d.tool || "";
         return `
-          <article class="item ${klass}">
+          <article class="item ${klass}" data-entry-key="${esc(key)}">
             <div class="head">
               <span class="badge">${esc(e.source || "unknown")}</span>
               <span class="badge">${esc(e.step || "step")}</span>
@@ -333,14 +352,18 @@ def _page_html() -> str:
               <span class="ts">${esc(e.ts || "")}</span>
             </div>
             ${preview ? `<div class="preview">${esc(preview)}</div>` : ""}
-            <details>
+            <details${openKeys.has(key) ? " open" : ""}>
               <summary>details</summary>
               <pre>${esc(JSON.stringify(d, null, 2))}</pre>
             </details>
           </article>
         `;
       }).join("");
-      listEl.innerHTML = html || `<article class="item"><div class="preview">Пока нет записей под текущие фильтры.</div></article>`;
+      const finalHtml = html || `<article class="item"><div class="preview">Пока нет записей под текущие фильтры.</div></article>`;
+      if (finalHtml !== state.lastListHtml) {
+        listEl.innerHTML = finalHtml;
+        state.lastListHtml = finalHtml;
+      }
       statsEl.textContent = `entries: ${state.entries.length} (показано: ${items.length})`;
       clockEl.textContent = `updated: ${new Date().toLocaleTimeString()}`;
       renderChips();
@@ -354,12 +377,17 @@ def _page_html() -> str:
         const data = await res.json();
         state.error = "";
         state.supervisor = data.supervisor || {};
+        const supervisorSig = JSON.stringify(state.supervisor);
+        const supervisorChanged = supervisorSig !== state.lastSupervisorSig;
+        state.lastSupervisorSig = supervisorSig;
         const entries = Array.isArray(data.entries) ? data.entries : [];
+        let added = 0;
         for (const e of entries) {
           const key = entryKey(e);
           if (state.seen.has(key)) continue;
           state.seen.add(key);
           state.entries.push(e);
+          added += 1;
         }
         if (state.entries.length > 1200) {
           state.entries = state.entries.slice(-1200);
@@ -367,7 +395,7 @@ def _page_html() -> str:
         }
         if (data.latest_ts) state.since = data.latest_ts;
         updateSourceOptions();
-        render();
+        if (added > 0 || supervisorChanged || !state.lastListHtml) render();
       } catch (err) {
         state.error = String(err && err.message ? err.message : err);
         renderChips();
@@ -451,4 +479,3 @@ def start_trace_web_server(drive_root: pathlib.Path, host: str = "0.0.0.0", port
     thread = threading.Thread(target=httpd.serve_forever, daemon=True, name="trace-web")
     thread.start()
     return httpd
-
