@@ -378,12 +378,15 @@ Self-improvement в этой архитектуре выглядит так:
 
 Опциональные:
 
-- `OPENAI_API_KEY` (включает tool `web_search` через OpenAI Responses API)
+- `TAVILY_API_KEY` (включает `web_search` через Tavily; основной и рекомендуемый backend)
+- `OPENAI_API_KEY` (резервный backend для `web_search` через OpenAI Responses API)
 
 Тюнинг:
 
 - `OUROBOROS_MODEL`, `OUROBOROS_MODEL_CODE`, `OUROBOROS_MODEL_LIGHT`
 - `OUROBOROS_MODEL_FALLBACK_LIST`
+- `OUROBOROS_TAVILY_BASE_URL`, `OUROBOROS_TAVILY_SEARCH_DEPTH`, `OUROBOROS_TAVILY_TOPIC`
+- `OUROBOROS_TAVILY_MAX_RESULTS`, `OUROBOROS_TAVILY_INCLUDE_ANSWER`, `OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT`
 - `OUROBOROS_MAX_WORKERS`, `OUROBOROS_MAX_ROUNDS`
 - `OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`
 - `OUROBOROS_BG_BUDGET_PCT`

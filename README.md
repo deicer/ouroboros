@@ -207,7 +207,8 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Enables the `web_search` tool |
+| `TAVILY_API_KEY` | Enables `web_search` with Tavily (primary, recommended) |
+| `OPENAI_API_KEY` | Optional fallback for `web_search` when Tavily is unavailable |
 | `OPENCODE_API_KEY` | OpenCode API key for OpenCode Zen provider (including free models) |
 | `ANTHROPIC_API_KEY` | Optional provider key for OpenCode/provider integrations |
 | `TOTAL_BUDGET` | Fallback spending limit in USD (only used if OpenRouter key has no limit set) |
@@ -225,6 +226,12 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_MODEL_FREE_LIST` | *(empty)* | Ordered free-model priority list (comma-separated, first = highest priority) |
 | `OUROBOROS_REASONING_ENABLED` | `true` | Reasoning toggle for `x-ai/grok-4.1-fast` (`reasoning.enabled` in API payload) |
 | `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
+| `OUROBOROS_TAVILY_BASE_URL` | `https://api.tavily.com` | Tavily API base URL |
+| `OUROBOROS_TAVILY_SEARCH_DEPTH` | `basic` | Default Tavily search depth (`ultra-fast`,`fast`,`basic`,`advanced`) |
+| `OUROBOROS_TAVILY_TOPIC` | `general` | Default Tavily topic (`general`,`news`,`finance`) |
+| `OUROBOROS_TAVILY_MAX_RESULTS` | `5` | Default Tavily `max_results` (0..20) |
+| `OUROBOROS_TAVILY_INCLUDE_ANSWER` | `basic` | Tavily answer mode (`false`,`true`,`basic`,`advanced`) |
+| `OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT` | `false` | Tavily raw content mode (`false`,`true`,`text`,`markdown`) |
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
