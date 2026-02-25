@@ -732,8 +732,9 @@ def run_llm_loop(
     stateful_executor = _StatefulToolExecutor()
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
-    # Anti-loop guard: remember recent repeated tool error signatures.
+    # Anti-loop guards: repeated errors and repeated identical tool batches.
     recent_error_sigs: deque[str] = deque(maxlen=12)
+    recent_batch_sigs: deque[str] = deque(maxlen=12)
     try:
         repeated_error_threshold = max(2, int(os.environ.get("OUROBOROS_REPEAT_ERROR_THRESHOLD", "4")))
     except (ValueError, TypeError):
@@ -745,6 +746,16 @@ def run_llm_loop(
     except (ValueError, TypeError):
         repeated_error_window_min = 6
         log.warning("Invalid OUROBOROS_REPEAT_ERROR_WINDOW_MIN, defaulting to 6")
+    try:
+        repeated_batch_threshold = max(3, int(os.environ.get("OUROBOROS_REPEAT_TOOL_BATCH_THRESHOLD", "8")))
+    except (ValueError, TypeError):
+        repeated_batch_threshold = 8
+        log.warning("Invalid OUROBOROS_REPEAT_TOOL_BATCH_THRESHOLD, defaulting to 8")
+    try:
+        repeated_batch_window_min = max(4, int(os.environ.get("OUROBOROS_REPEAT_TOOL_BATCH_WINDOW_MIN", "10")))
+    except (ValueError, TypeError):
+        repeated_batch_window_min = 10
+        log.warning("Invalid OUROBOROS_REPEAT_TOOL_BATCH_WINDOW_MIN, defaulting to 10")
     try:
         MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
@@ -1029,6 +1040,47 @@ def run_llm_loop(
                         })
                         return final, accumulated_usage, llm_trace
 
+            # Detect repeated identical tool batches (same args + same results).
+            current_batch_sig = _batch_tool_signature(llm_trace, len(tool_calls))
+            if current_batch_sig:
+                recent_batch_sigs.append(current_batch_sig)
+                stop, top_sig, top_count = _should_stop_on_repeated_signature(
+                    recent_batch_sigs,
+                    threshold=repeated_batch_threshold,
+                    window_min=repeated_batch_window_min,
+                )
+                if stop:
+                    final = (
+                        f"⚠️ Stuck in repeated identical tool batches ({top_count} repeats in "
+                        f"last {len(recent_batch_sigs)} rounds). "
+                        f"Recurring signature: {truncate_for_log(top_sig, 260)}. "
+                        "Stopping to avoid loop. Please change approach or inspect constraints."
+                    )
+                    _append_thinking_trace(
+                        drive_logs,
+                        source="task_loop",
+                        step="repeated_tool_guard_stop",
+                        task_id=task_id,
+                        task_type=task_type or "task",
+                        round_idx=round_idx,
+                        details={
+                            "top_batch_signature": top_sig,
+                            "top_batch_count": top_count,
+                            "window_size": len(recent_batch_sigs),
+                            "threshold": repeated_batch_threshold,
+                        },
+                    )
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(),
+                        "type": "task_loop_guard_stop",
+                        "task_id": task_id,
+                        "reason": "repeated_tool_batch",
+                        "batch_signature": truncate_for_log(top_sig, 500),
+                        "repeat_count": int(top_count),
+                        "window_size": int(len(recent_batch_sigs)),
+                    })
+                    return final, accumulated_usage, llm_trace
+
             # --- Budget guard ---
             # LLM decides when to stop (Bible P0, P3). We only enforce hard budget limit.
             budget_result = _check_budget_limits(
@@ -1304,3 +1356,48 @@ def _batch_error_signature(llm_trace: Dict[str, Any], batch_size: int) -> str:
         return ""
     # Sort + dedupe for stability when parallel tool execution changes order.
     return " | ".join(sorted(set(sigs)))
+
+
+def _batch_tool_signature(llm_trace: Dict[str, Any], batch_size: int) -> str:
+    """Build a stable signature for all results in the latest tool batch."""
+    if batch_size <= 0:
+        return ""
+    tool_calls = llm_trace.get("tool_calls") or []
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return ""
+    recent = tool_calls[-batch_size:]
+    sigs: List[str] = []
+    for item in recent:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "unknown")
+        is_error = int(bool(item.get("is_error")))
+        args_json = json.dumps(
+            _safe_args(item.get("args")),
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        result = truncate_for_log(str(item.get("result") or ""), 220)
+        sigs.append(
+            f"{tool}|err={is_error}|args={truncate_for_log(args_json, 200)}|res={result}"
+        )
+    if not sigs:
+        return ""
+    return " || ".join(sorted(set(sigs)))
+
+
+def _should_stop_on_repeated_signature(
+    recent_sigs: deque[str],
+    *,
+    threshold: int,
+    window_min: int,
+) -> Tuple[bool, str, int]:
+    """Decide whether a repeated-signature guard should stop the task."""
+    if len(recent_sigs) < max(1, int(window_min)):
+        return False, "", 0
+    non_empty = [s for s in recent_sigs if s]
+    if not non_empty:
+        return False, "", 0
+    top_sig, top_count = Counter(non_empty).most_common(1)[0]
+    return top_count >= max(1, int(threshold)), top_sig, int(top_count)

@@ -10,6 +10,7 @@ import logging
 log = logging.getLogger(__name__)
 
 import datetime
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -21,7 +22,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from supervisor.state import load_state, append_jsonl
+from supervisor.state import load_state, save_state, append_jsonl
 from supervisor import git_ops
 from supervisor.telegram import send_with_budget
 
@@ -178,6 +179,45 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
 # Auto-resume after restart
 # ---------------------------------------------------------------------------
 
+_AUTO_RESUME_TEXT = (
+    "[auto-resume after restart] Continue your work. Read scratchpad and identity "
+    "— they contain context of what you were doing."
+)
+
+
+def _auto_resume_signature(chat_id: int, text: str) -> str:
+    raw = f"{int(chat_id)}|{str(text).strip()}".encode("utf-8", errors="ignore")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _should_skip_auto_resume(
+    st: Dict[str, Any],
+    signature: str,
+    now_iso: str,
+    dedup_sec: int,
+) -> bool:
+    """Return True when the same auto-resume was already sent recently."""
+    if dedup_sec <= 0:
+        return False
+    last = st.get("auto_resume_last")
+    if not isinstance(last, dict):
+        return False
+    if str(last.get("signature") or "") != str(signature):
+        return False
+    last_ts = str(last.get("ts") or "")
+    if not last_ts:
+        return False
+    try:
+        now_dt = datetime.datetime.fromisoformat(now_iso)
+        last_dt = datetime.datetime.fromisoformat(last_ts)
+        return (now_dt - last_dt).total_seconds() <= float(dedup_sec)
+    except Exception:
+        return False
+
+
+def _mark_auto_resume(st: Dict[str, Any], signature: str, now_iso: str) -> None:
+    st["auto_resume_last"] = {"signature": str(signature), "ts": str(now_iso)}
+
 def auto_resume_after_restart() -> None:
     """If recent restart left open work, auto-resume without waiting for owner message.
 
@@ -190,6 +230,11 @@ def auto_resume_after_restart() -> None:
         chat_id = st.get("owner_chat_id")
         if not chat_id:
             return
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            dedup_sec = max(60, int(str(os.environ.get("OUROBOROS_AUTO_RESUME_DEDUP_SEC", "900")).strip()))
+        except (TypeError, ValueError):
+            dedup_sec = 900
 
         # Check for recent restart (within 2 minutes)
         restart_verify_path = DRIVE_ROOT / "state" / "pending_restart_verify.json"
@@ -215,6 +260,19 @@ def auto_resume_after_restart() -> None:
         if not recent_restart:
             return
 
+        signature = _auto_resume_signature(int(chat_id), _AUTO_RESUME_TEXT)
+        if _should_skip_auto_resume(st, signature=signature, now_iso=now_iso, dedup_sec=dedup_sec):
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": now_iso,
+                    "type": "auto_resume_skipped_dedup",
+                    "signature": signature[:12],
+                    "dedup_sec": dedup_sec,
+                },
+            )
+            return
+
         # Check if scratchpad has meaningful content
         scratchpad_path = DRIVE_ROOT / "memory" / "scratchpad.md"
         if not scratchpad_path.exists():
@@ -238,19 +296,22 @@ def auto_resume_after_restart() -> None:
         time.sleep(2)  # Let everything initialize
         agent = _get_chat_agent()
         if not agent._busy:
+            _mark_auto_resume(st, signature=signature, now_iso=now_iso)
+            save_state(st)
             import threading
             threading.Thread(
                 target=handle_chat_direct,
                 args=(int(chat_id),
-                      "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
+                      _AUTO_RESUME_TEXT,
                       None),
                 daemon=True,
             ).start()
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "ts": now_iso,
                     "type": "auto_resume_triggered",
+                    "signature": signature[:12],
                 },
             )
     except Exception as e:
@@ -534,5 +595,3 @@ def ensure_workers_healthy() -> None:
                         queue.enqueue_task(task, front=True)
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
-
-

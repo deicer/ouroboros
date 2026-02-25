@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -428,6 +429,55 @@ def budget_line(force: bool = False) -> str:
         return ""
 
 
+def _normalize_progress_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _progress_dedup_decision(
+    st: Dict[str, Any],
+    text: str,
+    *,
+    now_epoch: float,
+    window_sec: int,
+) -> Tuple[bool, Dict[str, Any], int]:
+    """Return (suppress, updated_state, suppressed_count)."""
+    if window_sec <= 0:
+        return False, st, 0
+    norm = _normalize_progress_text(text)
+    if not norm:
+        return False, st, 0
+
+    dedup = st.get("progress_dedup")
+    if not isinstance(dedup, dict):
+        dedup = {}
+
+    last_text = str(dedup.get("last_text") or "")
+    try:
+        last_epoch = float(dedup.get("last_epoch") or 0.0)
+    except (TypeError, ValueError):
+        last_epoch = 0.0
+    try:
+        suppressed_count = int(dedup.get("suppressed_count") or 0)
+    except (TypeError, ValueError):
+        suppressed_count = 0
+
+    if last_text and norm == last_text and (now_epoch - last_epoch) <= float(window_sec):
+        suppressed_count += 1
+        st["progress_dedup"] = {
+            "last_text": last_text,
+            "last_epoch": last_epoch,
+            "suppressed_count": suppressed_count,
+        }
+        return True, st, suppressed_count
+
+    st["progress_dedup"] = {
+        "last_text": norm,
+        "last_epoch": float(now_epoch),
+        "suppressed_count": 0,
+    }
+    return False, st, 0
+
+
 def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
     append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -447,10 +497,37 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     # Progress messages go to progress.jsonl instead of chat.jsonl
     # This keeps chat history clean for context building
     if is_progress:
+        log_payload = text if log_text is None else log_text
+        try:
+            dedup_window_sec = max(
+                0,
+                int(str(st.get("progress_dedup_window_sec") or os.environ.get("OUROBOROS_PROGRESS_DEDUP_WINDOW_SEC", "180")).strip()),
+            )
+        except (TypeError, ValueError):
+            dedup_window_sec = 180
+        now_epoch = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        suppress, st, suppressed_count = _progress_dedup_decision(
+            st,
+            str(log_payload),
+            now_epoch=now_epoch,
+            window_sec=dedup_window_sec,
+        )
+        save_state(st)
+        if suppress:
+            if suppressed_count in {1, 5, 20, 50}:
+                append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "progress_dedup_suppressed",
+                    "chat_id": chat_id,
+                    "suppressed_count": int(suppressed_count),
+                    "window_sec": int(dedup_window_sec),
+                    "text_preview": str(log_payload)[:160],
+                })
+            return
         append_jsonl(DRIVE_ROOT / "logs" / "progress.jsonl", {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "direction": "out", "chat_id": chat_id, "user_id": owner_id,
-            "text": text if log_text is None else log_text,
+            "text": log_payload,
         })
     else:
         log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
