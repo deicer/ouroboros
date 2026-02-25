@@ -8,11 +8,13 @@ context.py (context building), review.py (code collection/metrics).
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
 import pathlib
 import queue
+import re
 import threading
 import time
 import traceback
@@ -49,6 +51,19 @@ _LOOP_GUARD_EN_MARKERS = (
 _LOOP_GUARD_USER_TEXT_RU = (
     "⚠️ Обнаружен цикл повторяющихся действий. Остановил текущий ход и жду короткое уточнение, чтобы продолжить без повторов."
 )
+_STATUS_TEMPLATE_MARKERS = (
+    "## фактологичный апдейт",
+    "## фоновый цикл",
+    "## рефлексия",
+    "## статус",
+)
+_FOCUS_STOPWORDS = {
+    "что", "где", "когда", "почему", "как", "зачем", "или", "это", "этот", "эта", "эти",
+    "уже", "еще", "ещё", "тут", "там", "мне", "тебя", "твой", "мою", "мой", "моих",
+    "про", "для", "без", "вот", "давай", "можешь", "можем", "надо", "нужно", "если",
+    "чтобы", "только", "сам", "сама", "сейчас", "тогда", "просто", "очень",
+    "the", "and", "with", "from", "your", "about", "what", "why", "how",
+}
 
 
 def _split_user_and_log_text(text: str) -> Tuple[str, str]:
@@ -91,6 +106,50 @@ def _strip_background_preamble_for_user(text: str, task: Optional[Dict[str, Any]
 
     # No explicit answer section found — avoid leaking internal background report.
     return "⚠️ Внутренний отчёт не должен был попасть в чат. Повтори запрос, отвечу по делу."
+
+
+def _is_status_template_reply(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if any(low.startswith(marker) for marker in _STATUS_TEMPLATE_MARKERS):
+        return True
+    return "текущее состояние" in low and ("следующий шаг" in low or "бюджет:" in low)
+
+
+def _text_similarity(a: str, b: str) -> float:
+    a_norm = " ".join(str(a or "").lower().split())
+    b_norm = " ".join(str(b or "").lower().split())
+    if not a_norm or not b_norm:
+        return 0.0
+    return difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+
+
+def _extract_focus_tokens(text: str) -> List[str]:
+    tokens = []
+    for token in re.findall(r"[A-Za-zА-Яа-я0-9_]{3,}", str(text or "").lower()):
+        if token in _FOCUS_STOPWORDS:
+            continue
+        tokens.append(token)
+    # stable dedup
+    out: List[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _response_focus_overlap_ratio(response_text: str, task_text: str) -> float:
+    focus = _extract_focus_tokens(task_text)
+    if not focus:
+        return 1.0
+    response_low = str(response_text or "").lower()
+    hits = sum(1 for token in focus if token in response_low)
+    return hits / float(len(focus))
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +593,151 @@ class OuroborosAgent:
     # Task result emission
     # =====================================================================
 
+    def _last_outgoing_chat_text(self, chat_id: int, max_entries: int = 120) -> str:
+        """Get the most recent outgoing chat message for this chat from log tail."""
+        if not chat_id:
+            return ""
+        try:
+            entries = self.memory.read_jsonl_tail("chat.jsonl", max_entries=max_entries)
+        except Exception:
+            log.debug("Failed to read chat tail for relevance guard", exc_info=True)
+            return ""
+
+        for entry in reversed(entries):
+            try:
+                if str(entry.get("direction", "")).lower() not in {"out", "outgoing"}:
+                    continue
+                if int(entry.get("chat_id") or 0) != int(chat_id):
+                    continue
+                txt = str(entry.get("text") or "").strip()
+                if txt:
+                    return txt
+            except Exception:
+                continue
+        return ""
+
+    def _rewrite_user_reply_for_relevance(
+        self,
+        current_text: str,
+        *,
+        task_text: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Rewrite a stale template-like reply into a direct answer for latest user question.
+
+        Returns (rewritten_text, usage_dict). usage_dict can be empty on failure.
+        """
+        question = str(task_text or "").strip()
+        draft = str(current_text or "").strip()
+        if not question or not draft:
+            return current_text, {}
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Ты редактор ответа ассистента владельцу. "
+                    "Перепиши черновик в ПРЯМОЙ ответ на последний вопрос пользователя.\n"
+                    "Правила:\n"
+                    "- Только русский язык.\n"
+                    "- 2-5 предложений.\n"
+                    "- Сразу отвечай на вопрос по сути.\n"
+                    "- Без заголовков, списков, телеметрии, таймстампов и внутренних отчётов.\n"
+                    "- Не пиши про фоновый цикл.\n"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Вопрос пользователя:\n{question}\n\n"
+                    f"Черновик ответа (он шаблонный/устаревший, перепиши):\n{draft}\n\n"
+                    "Верни только финальный ответ."
+                ),
+            },
+        ]
+
+        try:
+            model = self.llm.default_model()
+            msg, usage = self.llm.chat(
+                messages=prompt_messages,
+                model=model,
+                tools=None,
+                reasoning_effort="low",
+                max_tokens=220,
+            )
+            rewritten = str(msg.get("content") or "").strip()
+            if rewritten:
+                return rewritten, usage or {}
+            return current_text, usage or {}
+        except Exception:
+            log.debug("Relevance rewrite failed; fallback to deterministic text", exc_info=True)
+            fallback = (
+                "Понял. Я дал шаблонный статус вместо прямого ответа. "
+                "Причина — повтор старого контекста, а не новый анализ вопроса. "
+                "Исправляю это и дальше отвечаю сначала по сути, без шаблонных отчётов."
+            )
+            return fallback, {}
+
+    def _apply_response_relevance_guard(
+        self,
+        user_text: str,
+        task: Dict[str, Any],
+        usage_total: Dict[str, Any],
+        drive_logs: pathlib.Path,
+    ) -> str:
+        """
+        Detect stale repeated status-template replies and rewrite them into a direct answer.
+        """
+        if _is_auto_resume_task(task):
+            return user_text
+
+        task_text = str(task.get("text") or "").strip()
+        candidate = str(user_text or "").strip()
+        chat_id = int(task.get("chat_id") or 0)
+        if not task_text or not candidate or not chat_id:
+            return user_text
+        if not _is_status_template_reply(candidate):
+            return user_text
+
+        prev_out = self._last_outgoing_chat_text(chat_id)
+        similarity = _text_similarity(candidate, prev_out)
+        overlap_ratio = _response_focus_overlap_ratio(candidate, task_text)
+
+        # Guard trigger:
+        # - template-like reply,
+        # - highly similar to previous outgoing text,
+        # - and weak overlap with latest question focus.
+        should_rewrite = similarity >= 0.88 and overlap_ratio < 0.45
+        if not should_rewrite:
+            return user_text
+
+        rewritten, rewrite_usage = self._rewrite_user_reply_for_relevance(
+            candidate,
+            task_text=task_text,
+        )
+        if rewrite_usage:
+            add_usage(usage_total, rewrite_usage)
+            self._pending_events.append({
+                "type": "llm_usage",
+                "provider": "openrouter",
+                "usage": rewrite_usage,
+                "category": "task",
+                "task_id": task.get("id"),
+                "model": self.llm.default_model(),
+                "ts": utc_now_iso(),
+            })
+
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "response_relevance_guard_rewrite",
+            "task_id": task.get("id"),
+            "chat_id": chat_id,
+            "similarity_to_prev_out": round(float(similarity), 4),
+            "focus_overlap_ratio": round(float(overlap_ratio), 4),
+            "question_preview": truncate_for_log(task_text, 200),
+        })
+        return rewritten
+
     def _emit_task_results(
         self, task: Dict[str, Any], text: str,
         usage: Dict[str, Any], llm_trace: Dict[str, Any],
@@ -547,6 +751,7 @@ class OuroborosAgent:
 
         sanitized_for_user = _strip_background_preamble_for_user(text, task)
         user_text, log_text = _split_user_and_log_text(sanitized_for_user)
+        user_text = self._apply_response_relevance_guard(user_text, task, usage, drive_logs)
         # Keep full model output for diagnostics even when user text is sanitized.
         log_text = str(text or "")
         self._pending_events.append({
