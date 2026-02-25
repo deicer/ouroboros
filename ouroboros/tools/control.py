@@ -1,4 +1,4 @@
-"""Control tools: restart, promote, schedule, cancel, review, chat_history, update_scratchpad, switch_model."""
+"""Control tools: restart, promote, schedule, cancel, review, chat_history, update_scratchpad, switch_model, reload_model_config."""
 
 from __future__ import annotations
 
@@ -195,6 +195,36 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     return f"OK: switching to {', '.join(changes)} on next round."
 
 
+def _reload_model_config(ctx: ToolContext, apply_now: bool = True) -> str:
+    """
+    Reload model config from .env and optionally apply main model immediately.
+
+    This allows runtime model updates without full process restart.
+    """
+    from ouroboros.llm import (
+        refresh_model_env_from_dotenv,
+        get_main_model_from_env,
+        get_paid_models_from_env,
+        get_free_models_from_env,
+    )
+
+    changed = refresh_model_env_from_dotenv(force=True)
+    main = get_main_model_from_env()
+    paid = get_paid_models_from_env(active_model=main)
+    free = get_free_models_from_env(active_model=main)
+
+    applied_msg = ""
+    if apply_now:
+        ctx.active_model_override = main
+        applied_msg = f" Applied now: model={main}."
+
+    return (
+        f"OK: model config reloaded from .env ({'changed' if changed else 'no changes'})."
+        f"{applied_msg} Paid priority: {', '.join([main, *paid]) or '<empty>'}. "
+        f"Free priority: {', '.join(free) or '<empty>'}."
+    )
+
+
 def _get_task_result(ctx: ToolContext, task_id: str) -> str:
     """Read the result of a completed subtask."""
     results_dir = Path(ctx.drive_root) / "task_results"
@@ -319,6 +349,15 @@ def get_tools() -> List[ToolEntry]:
                            "description": "Reasoning effort level. Leave empty to keep current."},
             }, "required": []},
         }, _switch_model),
+        ToolEntry("reload_model_config", {
+            "name": "reload_model_config",
+            "description": "Reload model settings from .env (paid/free priority lists, main model, auto-free switch). "
+                           "Use after updating .env without restarting the bot.",
+            "parameters": {"type": "object", "properties": {
+                "apply_now": {"type": "boolean", "default": True,
+                               "description": "If true, switch current task to reloaded main model on next round."},
+            }, "required": []},
+        }, _reload_model_config),
         ToolEntry("get_task_result", {
             "name": "get_task_result",
             "description": "Read the result of a completed subtask. Use after schedule_task to collect results.",

@@ -6,6 +6,7 @@ from ouroboros.llm import (
     get_free_models_from_env,
     get_paid_models_from_env,
     is_free_model,
+    refresh_model_env_from_dotenv,
 )
 
 
@@ -96,3 +97,28 @@ def test_get_fallback_models_respects_paid_then_free_priority(monkeypatch):
         "arcee-ai/trinity-large-preview:free",
         "z-ai/glm-4.5-air:free",
     ]
+
+
+def test_refresh_model_env_from_dotenv_runtime(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OUROBOROS_MODEL=anthropic/claude-sonnet-4.6",
+                "OUROBOROS_MODEL_PAID_LIST=anthropic/claude-sonnet-4.6,x-ai/grok-4.1-fast",
+                "OUROBOROS_MODEL_FREE_LIST=arcee-ai/trinity-large-preview:free",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("OUROBOROS_ENV_FILE", str(env_file))
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL_PAID_LIST", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL_FREE_LIST", raising=False)
+
+    changed = refresh_model_env_from_dotenv(force=True)
+    assert changed is True
+    assert os.environ.get("OUROBOROS_MODEL") == "anthropic/claude-sonnet-4.6"
+    assert os.environ.get("OUROBOROS_MODEL_PAID_LIST") == "anthropic/claude-sonnet-4.6,x-ai/grok-4.1-fast"
+    assert os.environ.get("OUROBOROS_MODEL_FREE_LIST") == "arcee-ai/trinity-large-preview:free"

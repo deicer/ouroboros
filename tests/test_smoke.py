@@ -94,7 +94,7 @@ EXPECTED_TOOLS = [
     "chat_history", "update_scratchpad", "update_identity", "update_user_context",
     "request_restart", "promote_to_stable", "request_review",
     "schedule_task", "cancel_task",
-    "switch_model", "toggle_evolution", "toggle_consciousness",
+    "switch_model", "reload_model_config", "toggle_evolution", "toggle_consciousness",
     "send_owner_message", "send_photo",
     "codebase_digest", "codebase_health",
     "knowledge_read", "knowledge_write", "knowledge_list",

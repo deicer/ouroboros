@@ -9,10 +9,29 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
+
+_MODEL_ENV_KEYS = [
+    "OUROBOROS_MODEL",
+    "OUROBOROS_MODEL_CODE",
+    "OUROBOROS_MODEL_LIGHT",
+    "OUROBOROS_MODEL_FALLBACK_LIST",
+    "OUROBOROS_MODEL_PAID_LIST",
+    "OUROBOROS_MODEL_FREE_LIST",
+    "OUROBOROS_AUTO_FREE_SWITCH",
+    "OUROBOROS_AUTO_FREE_SWITCH_AT_USD",
+    "OUROBOROS_REASONING_ENABLED",
+    "OUROBOROS_WEBSEARCH_MODEL",
+]
+_ENV_REFRESH_LOCK = threading.Lock()
+_ENV_REFRESH_LAST_PATH = ""
+_ENV_REFRESH_LAST_MTIME_NS = -1
+_ENV_REFRESH_MANAGED: Dict[str, str] = {}
 
 def _env_model(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
@@ -47,7 +66,87 @@ def _ordered_unique(items: List[str]) -> List[str]:
     return out
 
 
+def _resolve_env_file() -> Optional[pathlib.Path]:
+    explicit = _env_model("OUROBOROS_ENV_FILE")
+    if explicit:
+        p = pathlib.Path(explicit).expanduser().resolve()
+        if p.exists():
+            return p
+    repo_dir = _env_model("OUROBOROS_REPO_DIR")
+    if repo_dir:
+        p = pathlib.Path(repo_dir).expanduser().resolve() / ".env"
+        if p.exists():
+            return p
+    p = pathlib.Path.cwd() / ".env"
+    if p.exists():
+        return p.resolve()
+    return None
+
+
+def refresh_model_env_from_dotenv(force: bool = False) -> bool:
+    """
+    Reload model-related OUROBOROS_* settings from .env at runtime.
+
+    Returns True when any value actually changed in os.environ.
+    """
+    global _ENV_REFRESH_LAST_PATH, _ENV_REFRESH_LAST_MTIME_NS
+
+    env_file = _resolve_env_file()
+    if env_file is None:
+        return False
+
+    try:
+        mtime_ns = int(env_file.stat().st_mtime_ns)
+    except OSError:
+        return False
+
+    with _ENV_REFRESH_LOCK:
+        if (
+            not force
+            and _ENV_REFRESH_LAST_PATH == str(env_file)
+            and _ENV_REFRESH_LAST_MTIME_NS == mtime_ns
+        ):
+            return False
+
+        try:
+            from dotenv import dotenv_values
+        except Exception:
+            log.debug("python-dotenv unavailable; skip runtime env refresh", exc_info=True)
+            return False
+
+        parsed = dotenv_values(str(env_file))
+        changed = False
+        for key in _MODEL_ENV_KEYS:
+            if key not in parsed:
+                continue
+            raw_val = parsed.get(key)
+            val = str(raw_val or "").strip()
+            cur = os.environ.get(key)
+            managed_before = key in _ENV_REFRESH_MANAGED
+
+            # Respect externally-provided env unless force=True.
+            # This keeps launcher/runtime-provided env authoritative by default.
+            if not force and cur is not None and not managed_before:
+                continue
+
+            if val:
+                if cur != val:
+                    os.environ[key] = val
+                    changed = True
+                _ENV_REFRESH_MANAGED[key] = val
+            else:
+                if cur is not None:
+                    os.environ.pop(key, None)
+                    changed = True
+                _ENV_REFRESH_MANAGED.pop(key, None)
+
+        _ENV_REFRESH_LAST_PATH = str(env_file)
+        _ENV_REFRESH_LAST_MTIME_NS = mtime_ns
+        return changed
+
+
 def get_main_model_from_env() -> str:
+    refresh_model_env_from_dotenv(force=False)
     main = _env_model("OUROBOROS_MODEL")
     if not main:
         raise RuntimeError("OUROBOROS_MODEL is required and must be non-empty")
@@ -55,11 +154,13 @@ def get_main_model_from_env() -> str:
 
 
 def get_light_model_from_env() -> str:
+    refresh_model_env_from_dotenv(force=False)
     light = _env_model("OUROBOROS_MODEL_LIGHT")
     return light or get_main_model_from_env()
 
 
 def get_allowed_models_from_env() -> List[str]:
+    refresh_model_env_from_dotenv(force=False)
     main = _env_model("OUROBOROS_MODEL")
     code = _env_model("OUROBOROS_MODEL_CODE")
     light = _env_model("OUROBOROS_MODEL_LIGHT")
@@ -77,6 +178,7 @@ def get_paid_models_from_env(active_model: str = "") -> List[str]:
     1) OUROBOROS_MODEL_PAID_LIST (explicit ordered list)
     2) Legacy model slots (main/code/light + fallback list), filtered to non-free
     """
+    refresh_model_env_from_dotenv(force=False)
     active = str(active_model or "").strip()
     explicit_models = _env_model_list("OUROBOROS_MODEL_PAID_LIST")
     if explicit_models:
@@ -92,6 +194,7 @@ def get_paid_models_from_env(active_model: str = "") -> List[str]:
 
 
 def get_fallback_models_from_env(active_model: str = "") -> List[str]:
+    refresh_model_env_from_dotenv(force=False)
     active = str(active_model or "").strip()
     paid_models = get_paid_models_from_env(active_model=active)
     free_models = get_free_models_from_env(active_model=active)
@@ -120,6 +223,7 @@ def get_free_models_from_env(active_model: str = "") -> List[str]:
     1) OUROBOROS_MODEL_FREE_LIST (explicit override)
     2) Free models discovered among fallback/main/code/light env models
     """
+    refresh_model_env_from_dotenv(force=False)
     active = str(active_model or "").strip()
 
     explicit_models = _env_model_list("OUROBOROS_MODEL_FREE_LIST")
