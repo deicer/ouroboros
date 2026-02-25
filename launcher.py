@@ -48,6 +48,17 @@ def _parse_int_cfg(raw: Optional[str], default: int, minimum: int = 0) -> int:
         val = default
     return max(minimum, val)
 
+
+def _parse_bool_cfg(raw: Optional[str], default: bool = False) -> bool:
+    if raw is None:
+        return default
+    v = str(raw).strip().lower()
+    if v in {"1", "true", "yes", "on"}:
+        return True
+    if v in {"0", "false", "no", "off"}:
+        return False
+    return default
+
 OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
@@ -81,6 +92,16 @@ DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
     get_cfg("OUROBOROS_DIAG_SLOW_CYCLE_SEC", default="20"),
     default=20,
     minimum=0,
+)
+TRACE_WEB_ENABLED = _parse_bool_cfg(
+    get_cfg("OUROBOROS_TRACE_WEB_ENABLED", default="true"),
+    default=True,
+)
+TRACE_WEB_HOST = get_cfg("OUROBOROS_TRACE_WEB_HOST", default="0.0.0.0") or "0.0.0.0"
+TRACE_WEB_PORT = _parse_int_cfg(
+    get_cfg("OUROBOROS_TRACE_WEB_PORT", default="8088"),
+    default=8088,
+    minimum=1,
 )
 
 os.environ["OPENROUTER_API_KEY"] = str(OPENROUTER_API_KEY)
@@ -289,15 +310,52 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
+    "trace_web_enabled": TRACE_WEB_ENABLED,
+    "trace_web_host": TRACE_WEB_HOST,
+    "trace_web_port": TRACE_WEB_PORT,
 })
 
 # ----------------------------
-# 6.1) Auto-resume after restart
+# 6.1) Live thinking trace web monitor
+# ----------------------------
+try:
+    if TRACE_WEB_ENABLED:
+        from supervisor.trace_web import start_trace_web_server
+        _trace_web_server = start_trace_web_server(
+            drive_root=DRIVE_ROOT,
+            host=TRACE_WEB_HOST,
+            port=TRACE_WEB_PORT,
+        )
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "trace_web_start",
+                "host": TRACE_WEB_HOST,
+                "port": TRACE_WEB_PORT,
+                "ok": bool(_trace_web_server),
+                "path": "/thinking",
+            },
+        )
+except Exception as e:
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "trace_web_start_error",
+            "host": TRACE_WEB_HOST,
+            "port": TRACE_WEB_PORT,
+            "error": repr(e),
+        },
+    )
+
+# ----------------------------
+# 6.2) Auto-resume after restart
 # ----------------------------
 auto_resume_after_restart()
 
 # ----------------------------
-# 6.2) Direct-mode watchdog
+# 6.3) Direct-mode watchdog
 # ----------------------------
 def _chat_watchdog_loop():
     """Monitor direct-mode chat agent for hangs. Runs as daemon thread."""
@@ -343,7 +401,7 @@ _watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)
 _watchdog_thread.start()
 
 # ----------------------------
-# 6.3) Background consciousness
+# 6.4) Background consciousness
 # ----------------------------
 from ouroboros.consciousness import BackgroundConsciousness
 

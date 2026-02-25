@@ -107,6 +107,16 @@ First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI,
 
 Check logs: `docker compose logs -f`
 
+### Live Thinking Trace
+
+After launch, open:
+
+```text
+http://<YOUR_SERVER_IP>:8088/thinking
+```
+
+This page streams `data/logs/thinking_trace.jsonl` in near real time and shows worker health from `supervisor.jsonl`.
+
 ### Step 4: Connect
 
 Open your Telegram bot and send any message. The first person to write becomes the **owner**. All messages from other users are ignored.
