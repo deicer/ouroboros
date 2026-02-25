@@ -8,28 +8,35 @@ Extracted from agent.py to keep the agent thin.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import queue
 import threading
 import time
 from collections import Counter, deque
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import logging
-
+from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.llm import (
     LLMClient,
-    normalize_reasoning_effort,
     add_usage,
     get_fallback_models_from_env,
     get_free_models_from_env,
     is_free_model,
+    normalize_reasoning_effort,
 )
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
+from ouroboros.utils import (
+    append_jsonl,
+    estimate_tokens,
+    sanitize_tool_args_for_log,
+    sanitize_tool_result_for_log,
+    truncate_for_log,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +170,17 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        log.warning("Invalid %s=%r, using default=%s", name, raw, default)
+        return default
+
+
 def _pick_auto_free_model(active_model: str, budget_remaining_usd: Optional[float]) -> Optional[str]:
     """Pick a free fallback model when budget is low enough."""
     if not _env_bool("OUROBOROS_AUTO_FREE_SWITCH", default=True):
@@ -176,6 +194,86 @@ def _pick_auto_free_model(active_model: str, budget_remaining_usd: Optional[floa
         return None
     free_candidates = get_free_models_from_env(active_model=active_model)
     return free_candidates[0] if free_candidates else None
+
+
+_DEFAULT_MODEL_CONTEXT_WINDOW = 200_000
+_MODEL_CONTEXT_WINDOWS = {
+    # Per-provider prefixes; approximate defaults for proactive context safety.
+    "x-ai/grok-4.1-fast": 2_000_000,
+    "anthropic/": 200_000,
+    "openai/": 200_000,
+    "google/": 1_000_000,
+}
+
+
+def _estimate_context_tokens(messages: List[Dict[str, Any]]) -> int:
+    """Estimate token size for current message history (content + tool call args)."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            total += estimate_tokens(content)
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if text:
+                    total += estimate_tokens(str(text))
+
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                if not isinstance(fn, dict):
+                    continue
+                total += estimate_tokens(str(fn.get("name") or ""))
+                total += estimate_tokens(str(fn.get("arguments") or ""))
+
+    return max(1, total)
+
+
+def _resolve_model_context_window(model: str) -> int:
+    """Resolve model context window with env overrides and safe defaults."""
+    direct_override = _env_int("OUROBOROS_MODEL_CONTEXT_WINDOW", _DEFAULT_MODEL_CONTEXT_WINDOW)
+    if direct_override > 0 and str(os.environ.get("OUROBOROS_MODEL_CONTEXT_WINDOW", "")).strip():
+        return direct_override
+
+    model_name = str(model or "").strip()
+
+    # Optional map override:
+    # OUROBOROS_MODEL_CONTEXT_WINDOWS="x-ai/grok-4.1-fast=2000000,anthropic/=200000"
+    mapping_raw = str(os.environ.get("OUROBOROS_MODEL_CONTEXT_WINDOWS", "") or "").strip()
+    if mapping_raw:
+        best_len = -1
+        best_val: Optional[int] = None
+        for chunk in mapping_raw.split(","):
+            item = chunk.strip()
+            if not item or "=" not in item:
+                continue
+            prefix, raw_limit = item.split("=", 1)
+            prefix = prefix.strip()
+            try:
+                limit = int(raw_limit.strip())
+            except (TypeError, ValueError):
+                continue
+            if limit <= 0:
+                continue
+            if model_name.startswith(prefix) and len(prefix) > best_len:
+                best_len = len(prefix)
+                best_val = limit
+        if best_val is not None:
+            return best_val
+
+    best_prefix = ""
+    best_window = _DEFAULT_MODEL_CONTEXT_WINDOW
+    for prefix, window in _MODEL_CONTEXT_WINDOWS.items():
+        if model_name.startswith(prefix) and len(prefix) > len(best_prefix):
+            best_prefix = prefix
+            best_window = window
+    return best_window
 
 
 def _append_thinking_trace(
@@ -555,12 +653,7 @@ def _maybe_inject_self_check(
     REMINDER_INTERVAL = 50
     if round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
         return
-    ctx_tokens = sum(
-        estimate_tokens(str(m.get("content", "")))
-        if isinstance(m.get("content"), str)
-        else sum(estimate_tokens(str(b.get("text", ""))) for b in m.get("content", []) if isinstance(b, dict))
-        for m in messages
-    )
+    ctx_tokens = _estimate_context_tokens(messages)
     task_cost = accumulated_usage.get("cost", 0)
     checkpoint_num = round_idx // REMINDER_INTERVAL
 
@@ -580,6 +673,103 @@ def _maybe_inject_self_check(
     )
     messages.append({"role": "system", "content": reminder})
     emit_progress(f"🔄 Checkpoint {checkpoint_num} at round {round_idx}: ~{ctx_tokens} tokens, ${task_cost:.2f} spent")
+
+
+def _maybe_auto_compact_context(
+    *,
+    round_idx: int,
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    active_model: str,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    task_type: str,
+    emit_progress: Callable[[str], None],
+) -> List[Dict[str, Any]]:
+    """
+    Auto-compact context when estimated usage crosses threshold.
+
+    Implements proactive compaction after LLM/tool rounds:
+    if context exceeds threshold percentage of model window, schedule
+    `compact_context(auto=True)` and apply compaction immediately.
+    """
+    if not _env_bool("OUROBOROS_AUTO_CONTEXT_COMPACT", default=True):
+        return messages
+
+    context_window = _resolve_model_context_window(active_model)
+    if context_window <= 0:
+        return messages
+
+    threshold_pct = _env_float("OUROBOROS_AUTO_CONTEXT_COMPACT_AT_PCT", 70.0)
+    threshold_pct = max(10.0, min(threshold_pct, 95.0))
+    threshold_tokens = int(context_window * (threshold_pct / 100.0))
+    ctx_tokens = _estimate_context_tokens(messages)
+    if ctx_tokens < threshold_tokens:
+        return messages
+
+    cooldown_rounds = max(1, _env_int("OUROBOROS_AUTO_CONTEXT_COMPACT_COOLDOWN_ROUNDS", 2))
+    last_round = int(getattr(tools._ctx, "_last_auto_compact_round", 0) or 0)
+    if round_idx - last_round < cooldown_rounds:
+        return messages
+
+    keep_last_n = max(2, min(_env_int("OUROBOROS_AUTO_CONTEXT_KEEP_LAST_N", 6), 20))
+
+    try:
+        # Route through the tool interface to preserve uniform behavior.
+        tools.execute("compact_context", {"keep_last_n": keep_last_n, "auto": True})
+        pending_compaction = getattr(tools._ctx, "_pending_compaction", None)
+        if pending_compaction is None:
+            return messages
+
+        compacted = compact_tool_history_llm(messages, keep_recent=pending_compaction)
+        tools._ctx._pending_compaction = None
+        tools._ctx._last_auto_compact_round = round_idx
+
+        _append_thinking_trace(
+            drive_logs,
+            source="task_loop",
+            step="auto_context_compaction",
+            task_id=task_id,
+            task_type=task_type or "task",
+            round_idx=round_idx,
+            details={
+                "auto": True,
+                "model": active_model,
+                "context_tokens_before": ctx_tokens,
+                "context_window": context_window,
+                "threshold_pct": threshold_pct,
+                "keep_last_n": pending_compaction,
+            },
+        )
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "auto_context_compaction",
+            "task_id": task_id,
+            "round": round_idx,
+            "task_type": task_type or "task",
+            "auto": True,
+            "model": active_model,
+            "context_tokens_before": int(ctx_tokens),
+            "context_window": int(context_window),
+            "threshold_pct": float(threshold_pct),
+            "keep_last_n": int(pending_compaction),
+        })
+        emit_progress(
+            f"🧠 Auto compact_context: ~{ctx_tokens}/{context_window} tokens "
+            f"({threshold_pct:.0f}%+), keep_last_n={pending_compaction}"
+        )
+        return compacted
+    except Exception as e:
+        log.warning("Auto context compaction failed: %s", e, exc_info=True)
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "auto_context_compaction_error",
+            "task_id": task_id,
+            "round": round_idx,
+            "task_type": task_type or "task",
+            "error": repr(e),
+        })
+        return messages
 
 
 def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
@@ -1001,6 +1191,16 @@ def run_llm_loop(
                 round_idx=round_idx,
                 details={"tool_count": len(tool_calls), "error_count": int(error_count)},
             )
+            messages = _maybe_auto_compact_context(
+                round_idx=round_idx,
+                messages=messages,
+                tools=tools,
+                active_model=active_model,
+                drive_logs=drive_logs,
+                task_id=task_id,
+                task_type=task_type or "task",
+                emit_progress=emit_progress,
+            )
 
             # Detect repeated failure patterns (e.g. same Unknown tool) and stop early.
             current_error_sig = _batch_error_signature(llm_trace, len(tool_calls))
@@ -1178,8 +1378,6 @@ def _call_llm_with_retry(
         (None, 0.0) on failure after max_retries
     """
     msg = None
-    last_error: Optional[Exception] = None
-
     for attempt in range(max_retries):
         try:
             kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
@@ -1246,7 +1444,6 @@ def _call_llm_with_retry(
             return msg, cost
 
         except Exception as e:
-            last_error = e
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_api_error",
                 "task_id": task_id,
