@@ -39,4 +39,6 @@ RUN git config --global --add safe.directory /app
 RUN chown -R ouroboros:ouroboros /app
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s \
+  CMD python -c "import ouroboros; print('ok')" || exit 1
 CMD ["python", "launcher.py"]
