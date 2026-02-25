@@ -211,12 +211,16 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |
 | `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
+| `OUROBOROS_MODEL_PAID_LIST` | *(empty)* | Ordered paid-model priority list (comma-separated, first = highest priority) |
+| `OUROBOROS_MODEL_FREE_LIST` | *(empty)* | Ordered free-model priority list (comma-separated, first = highest priority) |
 | `OUROBOROS_REASONING_ENABLED` | `true` | Reasoning toggle for `x-ai/grok-4.1-fast` (`reasoning.enabled` in API payload) |
 | `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
+| `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
+| `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
 | `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
 | `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
-| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
+| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Legacy fallback list (used when paid/free priority lists are not set) |
 
 ---
 

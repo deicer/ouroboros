@@ -24,6 +24,8 @@ from ouroboros.llm import (
     normalize_reasoning_effort,
     add_usage,
     get_fallback_models_from_env,
+    get_free_models_from_env,
+    is_free_model,
 )
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
@@ -136,6 +138,44 @@ def _truncate_tool_result(result: Any) -> str:
         return result_str
     original_len = len(result_str)
     return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        log.warning("Invalid %s=%r, using default=%s", name, raw, default)
+        return default
+
+
+def _pick_auto_free_model(active_model: str, budget_remaining_usd: Optional[float]) -> Optional[str]:
+    """Pick a free fallback model when budget is low enough."""
+    if not _env_bool("OUROBOROS_AUTO_FREE_SWITCH", default=True):
+        return None
+    if budget_remaining_usd is None:
+        return None
+    threshold = _env_float("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", 0.40)
+    if budget_remaining_usd > threshold:
+        return None
+    if is_free_model(active_model):
+        return None
+    free_candidates = get_free_models_from_env(active_model=active_model)
+    return free_candidates[0] if free_candidates else None
 
 
 def _append_thinking_trace(
@@ -676,6 +716,7 @@ def run_llm_loop(
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
+    auto_free_switch_announced = False
     # Wire module-level registry ref so tool_discovery handlers work outside run_llm_loop too
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
@@ -784,6 +825,31 @@ def run_llm_loop(
                     details={"from": prev_effort, "to": active_effort},
                 )
 
+            # Automatic paid -> free model switch on low budget.
+            auto_free_model = _pick_auto_free_model(active_model, budget_remaining_usd)
+            if auto_free_model:
+                prev_model = active_model
+                active_model = auto_free_model
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="auto_free_model_switch",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={
+                        "from": prev_model,
+                        "to": active_model,
+                        "remaining_budget_usd": budget_remaining_usd,
+                    },
+                )
+                if not auto_free_switch_announced:
+                    emit_progress(
+                        f"💸 Budget auto-switch: {prev_model} → {active_model} "
+                        f"(remaining ${float(budget_remaining_usd):.2f})"
+                    )
+                    auto_free_switch_announced = True
+
             # Inject owner messages (in-process queue + Drive mailbox)
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
@@ -862,7 +928,19 @@ def run_llm_loop(
                     ), accumulated_usage, llm_trace
 
                 # Fallback succeeded — continue processing with this msg
-                # (don't return — fall through to tool_calls processing below)
+                # Persist fallback model for subsequent rounds to avoid re-trying
+                # the unavailable/empty primary model every round.
+                prev_model = active_model
+                active_model = fallback_model
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="fallback_model_promoted",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"from": prev_model, "to": active_model},
+                )
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

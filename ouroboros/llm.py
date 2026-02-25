@@ -14,11 +14,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-DEFAULT_LIGHT_MODEL = "google/gemini-3-pro-preview"
-
-
 def _env_model(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
+
+
+def _env_model_list(name: str) -> List[str]:
+    raw = _env_model(name)
+    return [m.strip() for m in raw.split(",") if m.strip()]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -61,20 +63,77 @@ def get_allowed_models_from_env() -> List[str]:
     main = _env_model("OUROBOROS_MODEL")
     code = _env_model("OUROBOROS_MODEL_CODE")
     light = _env_model("OUROBOROS_MODEL_LIGHT")
-    fallback_raw = _env_model("OUROBOROS_MODEL_FALLBACK_LIST")
-    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()]
-    return _ordered_unique([main, code, light, *fallback_models])
+    fallback_models = _env_model_list("OUROBOROS_MODEL_FALLBACK_LIST")
+    paid_models = _env_model_list("OUROBOROS_MODEL_PAID_LIST")
+    free_models = _env_model_list("OUROBOROS_MODEL_FREE_LIST")
+    return _ordered_unique([main, code, light, *paid_models, *free_models, *fallback_models])
+
+
+def get_paid_models_from_env(active_model: str = "") -> List[str]:
+    """
+    Return paid model candidates from env in priority order.
+
+    Priority:
+    1) OUROBOROS_MODEL_PAID_LIST (explicit ordered list)
+    2) Legacy model slots (main/code/light + fallback list), filtered to non-free
+    """
+    active = str(active_model or "").strip()
+    explicit_models = _env_model_list("OUROBOROS_MODEL_PAID_LIST")
+    if explicit_models:
+        candidates = _ordered_unique(explicit_models)
+        return [m for m in candidates if m and m != active and not is_free_model(m)]
+
+    main = _env_model("OUROBOROS_MODEL")
+    code = _env_model("OUROBOROS_MODEL_CODE")
+    light = _env_model("OUROBOROS_MODEL_LIGHT")
+    fallback_models = _env_model_list("OUROBOROS_MODEL_FALLBACK_LIST")
+    candidates = _ordered_unique([main, code, light, *fallback_models])
+    return [m for m in candidates if m and m != active and not is_free_model(m)]
 
 
 def get_fallback_models_from_env(active_model: str = "") -> List[str]:
     active = str(active_model or "").strip()
+    paid_models = get_paid_models_from_env(active_model=active)
+    free_models = get_free_models_from_env(active_model=active)
+    candidates = _ordered_unique([*paid_models, *free_models])
+    return [m for m in candidates if m and m != active]
+
+
+def is_free_model(model: str) -> bool:
+    """Heuristic check for free-tier model identifiers."""
+    m = str(model or "").strip().lower()
+    if not m:
+        return False
+    return (
+        m.endswith(":free")
+        or m.endswith("-free")
+        or m.endswith("/free")
+        or ":free" in m
+    )
+
+
+def get_free_models_from_env(active_model: str = "") -> List[str]:
+    """
+    Return free model candidates from env in priority order.
+
+    Priority:
+    1) OUROBOROS_MODEL_FREE_LIST (explicit override)
+    2) Free models discovered among fallback/main/code/light env models
+    """
+    active = str(active_model or "").strip()
+
+    explicit_models = _env_model_list("OUROBOROS_MODEL_FREE_LIST")
+    if explicit_models:
+        candidates = _ordered_unique(explicit_models)
+        # Explicit list is authoritative even if names do not contain "free".
+        return [m for m in candidates if m and m != active]
+
     main = _env_model("OUROBOROS_MODEL")
     code = _env_model("OUROBOROS_MODEL_CODE")
     light = _env_model("OUROBOROS_MODEL_LIGHT")
-    fallback_raw = _env_model("OUROBOROS_MODEL_FALLBACK_LIST")
-    fallback_models = [m.strip() for m in fallback_raw.split(",") if m.strip()]
+    fallback_models = _env_model_list("OUROBOROS_MODEL_FALLBACK_LIST")
     candidates = _ordered_unique([*fallback_models, main, code, light])
-    return [m for m in candidates if m and m != active]
+    return [m for m in candidates if m and m != active and is_free_model(m)]
 
 
 def resolve_model_from_env(requested_model: str = "") -> str:

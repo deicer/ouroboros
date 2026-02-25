@@ -30,8 +30,14 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
+    get_budget_remaining,
 )
-from ouroboros.llm import LLMClient, get_light_model_from_env
+from ouroboros.llm import (
+    LLMClient,
+    get_light_model_from_env,
+    get_free_models_from_env,
+    is_free_model,
+)
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +86,32 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return get_light_model_from_env()
+        model = get_light_model_from_env()
+        if is_free_model(model):
+            return model
+
+        raw_enabled = str(os.environ.get("OUROBOROS_AUTO_FREE_SWITCH", "true")).strip().lower()
+        auto_enabled = raw_enabled in {"1", "true", "yes", "on"}
+        if not auto_enabled:
+            return model
+
+        try:
+            threshold = float(str(os.environ.get("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", "0.40")).strip())
+        except (TypeError, ValueError):
+            threshold = 0.40
+
+        try:
+            state_path = self._drive_root / "state" / "state.json"
+            state_data = json.loads(read_text(state_path))
+            remaining = get_budget_remaining(state_data)
+            if remaining is not None and remaining <= threshold:
+                free_candidates = get_free_models_from_env(active_model=model)
+                if free_candidates:
+                    return free_candidates[0]
+        except Exception:
+            log.debug("Failed to auto-switch BG model to free", exc_info=True)
+
+        return model
 
     def start(self) -> str:
         if self.is_running:
