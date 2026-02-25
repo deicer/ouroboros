@@ -1,5 +1,6 @@
 import json
 import pathlib
+import subprocess
 
 
 def test_build_opencode_cmd_basic():
@@ -138,3 +139,129 @@ def test_opencode_edit_large_prompt_fast_fails(tmp_path, monkeypatch):
     assert result.startswith("⚠️ OPENCODE_PROMPT_TOO_LARGE:")
     assert "Suggested atomic steps:" in result
     assert "1. Refactor block 1" in result
+
+
+def _read_jsonl(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_opencode_edit_fast_path_applies_simple_replace(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    target = repo_dir / "sample.txt"
+    target.write_text("hello world\n", encoding="utf-8")
+
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setattr("ouroboros.tools.shell._run_pytest", lambda repo: "")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._run_opencode_cli",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("OpenCode should not be called on fast path")),
+    )
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+    prompt = (
+        "FILE: sample.txt\n"
+        "REPLACE: hello\n"
+        "WITH: hi\n"
+        "COUNT: 1\n"
+    )
+    result = _opencode_edit(ctx, prompt)
+
+    assert "FAST_EDIT_APPLIED" in result
+    assert target.read_text(encoding="utf-8") == "hi world\n"
+
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["tool"] == "opencode_edit"
+    assert last["route"] == "fast_path"
+    assert last["ok"] is True
+
+
+def test_opencode_edit_fast_path_falls_back_to_opencode(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    (repo_dir / "sample.txt").write_text("hello world\n", encoding="utf-8")
+
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setattr("ouroboros.tools.shell._run_pytest", lambda repo: "")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_RETRIES", "1")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._run_opencode_cli",
+        lambda **kwargs: subprocess.CompletedProcess(args=[], returncode=0, stdout='{"text":"patched"}', stderr=""),
+    )
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+    prompt = (
+        "FILE: sample.txt\n"
+        "REPLACE: NOT_FOUND\n"
+        "WITH: hi\n"
+        "COUNT: 1\n"
+    )
+    result = _opencode_edit(ctx, prompt)
+
+    assert "patched" in result
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["route"] == "fallback_to_opencode"
+    assert last["fallback_used"] is True
+    assert last["ok"] is True
+    assert int(last["attempts_total"]) >= 1
+
+
+def test_opencode_edit_logs_failure_stats(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setattr("ouroboros.tools.shell._run_pytest", lambda repo: "")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
+    monkeypatch.setenv("OUROBOROS_OPENCODE_MAX_RETRIES", "1")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._run_opencode_cli",
+        lambda **kwargs: subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="boom"),
+    )
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+    result = _opencode_edit(ctx, "Refactor agent.py")
+
+    assert result.startswith("⚠️ OPENCODE_ERROR:")
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["route"] == "opencode"
+    assert last["ok"] is False
+    assert last["failure_reason"] == "opencode_failed"
+    assert int(last["attempts_total"]) >= 1

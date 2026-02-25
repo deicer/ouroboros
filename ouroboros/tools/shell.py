@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -14,14 +15,9 @@ import time
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
+from ouroboros.utils import append_jsonl, run_cmd, truncate_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
-
-_OPENCODE_FALLBACK_MODELS = [
-    "opencode/minimax-m2.5-free",
-    "opencode/trinity-large-preview-free",
-]
 
 
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
@@ -153,9 +149,18 @@ def _is_copilot_reauth_error(stdout: str, stderr: str) -> bool:
 def _opencode_fallback_models() -> List[str]:
     raw = os.environ.get("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
     models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
-    if models:
-        return models
-    return list(_OPENCODE_FALLBACK_MODELS)
+    if not models:
+        free_raw = os.environ.get("OUROBOROS_MODEL_FREE_LIST", "")
+        models = [m.strip() for m in free_raw.split(",") if m.strip()] if free_raw else []
+    # stable dedup preserving order
+    dedup: List[str] = []
+    seen = set()
+    for m in models:
+        if m in seen:
+            continue
+        seen.add(m)
+        dedup.append(m)
+    return dedup
 
 
 def _opencode_prompt_limits() -> tuple[int, int]:
@@ -224,7 +229,151 @@ def _format_prompt_too_large_message(prompt: str) -> str:
     return "\n".join(lines)
 
 
-def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
+def _append_tool_stats(ctx: ToolContext, payload: Dict[str, Any]) -> None:
+    """Append tool execution metrics for observability."""
+    try:
+        append_jsonl(
+            ctx.drive_logs() / "tools_stats.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "tool": "opencode_edit",
+                **payload,
+            },
+        )
+    except Exception:
+        log.debug("Failed to append tools_stats.jsonl for opencode_edit", exc_info=True)
+
+
+def _strip_wrapped_quotes(value: str) -> str:
+    v = (value or "").strip()
+    if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+        return v[1:-1]
+    return v
+
+
+def _parse_fast_edit_prompt(prompt: str) -> Dict[str, Any]:
+    """Parse simple single-file replace instruction from prompt."""
+    fields: Dict[str, str] = {}
+    for raw_line in str(prompt or "").splitlines():
+        m = re.match(r"^\s*(FILE|REPLACE|WITH|COUNT)\s*:\s*(.*?)\s*$", raw_line, re.IGNORECASE)
+        if not m:
+            continue
+        key = m.group(1).lower()
+        val = _strip_wrapped_quotes(m.group(2))
+        fields[key] = val
+
+    if {"file", "replace", "with"} <= set(fields.keys()):
+        count_raw = fields.get("count", "1").strip().lower()
+        if count_raw in {"all", "*"}:
+            count = 0
+        else:
+            try:
+                count = max(1, int(count_raw))
+            except Exception:
+                count = 1
+        return {
+            "file": fields["file"].strip(),
+            "replace": fields["replace"],
+            "with": fields["with"],
+            "count": count,
+            "reason": "structured_file_replace",
+        }
+
+    # Lightweight natural-language fallback for one-line edits.
+    patterns = [
+        r"""replace\s+["'](?P<old>.+?)["']\s+with\s+["'](?P<new>.+?)["']\s+in\s+file\s+["'](?P<file>.+?)["']""",
+        r"""замени\s+["'](?P<old>.+?)["']\s+на\s+["'](?P<new>.+?)["']\s+в\s+файле\s+["'](?P<file>.+?)["']""",
+    ]
+    text = str(prompt or "")
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return {
+                "file": m.group("file").strip(),
+                "replace": m.group("old"),
+                "with": m.group("new"),
+                "count": 1,
+                "reason": "natural_language_single_replace",
+            }
+    return {}
+
+
+def _resolve_fast_edit_target(repo_dir: pathlib.Path, work_dir: str, file_rel: str) -> pathlib.Path:
+    base = pathlib.Path(work_dir).resolve()
+    candidate = (base / file_rel).resolve()
+    repo_root = repo_dir.resolve()
+    try:
+        candidate.relative_to(repo_root)
+    except Exception as e:
+        raise ValueError(f"target outside repo: {file_rel}") from e
+    return candidate
+
+
+def _apply_fast_edit(ctx: ToolContext, work_dir: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply a simple replace operation via patch subprocess (with safe fallback)."""
+    target = _resolve_fast_edit_target(ctx.repo_dir, work_dir, str(plan.get("file") or ""))
+    if not target.exists() or not target.is_file():
+        return {"ok": False, "error": f"target file not found: {target}"}
+
+    old = str(plan.get("replace") or "")
+    new = str(plan.get("with") or "")
+    count = int(plan.get("count") or 1)
+    if not old:
+        return {"ok": False, "error": "REPLACE text is empty"}
+    if "\n" in old or "\n" in new:
+        return {"ok": False, "error": "fast edit supports only single-line replace"}
+
+    original = target.read_text(encoding="utf-8")
+    occurrences = original.count(old)
+    if occurrences <= 0:
+        return {"ok": False, "error": "replace text not found in target file"}
+
+    replace_count = occurrences if count <= 0 else min(count, occurrences)
+    if count <= 0:
+        updated = original.replace(old, new)
+    else:
+        updated = original.replace(old, new, replace_count)
+    if updated == original:
+        return {"ok": False, "error": "no effective changes produced"}
+
+    rel = os.path.relpath(target, start=work_dir)
+    patch_text = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            fromfile=rel,
+            tofile=rel,
+        )
+    )
+    if not patch_text.strip():
+        return {"ok": False, "error": "empty patch generated"}
+
+    method = "patch"
+    try:
+        patch_res = subprocess.run(
+            ["patch", "-p0", "--forward", "--silent"],
+            cwd=str(work_dir),
+            input=patch_text,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if patch_res.returncode != 0:
+            method = "python_replace_fallback"
+            target.write_text(updated, encoding="utf-8")
+    except Exception:
+        method = "python_replace_fallback"
+        target.write_text(updated, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "method": method,
+        "file": rel,
+        "replacements_applied": replace_count,
+    }
+
+
+def _check_uncommitted_changes(repo_dir: pathlib.Path, source: str = "OpenCode") -> str:
     """Check git status after edit, return warning string or empty string."""
     try:
         status_res = subprocess.run(
@@ -244,7 +393,7 @@ def _check_uncommitted_changes(repo_dir: pathlib.Path) -> str:
             )
             if diff_res.returncode == 0 and diff_res.stdout.strip():
                 return (
-                    f"\n\n⚠️ UNCOMMITTED CHANGES detected after OpenCode edit:\n"
+                    f"\n\n⚠️ UNCOMMITTED CHANGES detected after {source} edit:\n"
                     f"{diff_res.stdout.strip()}\n"
                     f"Remember to run git_status and repo_commit_push!"
                 )
@@ -349,12 +498,67 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
 
 
 def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Delegate code edits to OpenCode CLI."""
+    """Edit code via adaptive route: fast local patch for simple fixes, otherwise OpenCode CLI."""
+    started = time.monotonic()
+
+    def _finish(
+        result: str,
+        *,
+        ok: bool,
+        route: str,
+        fallback_used: bool,
+        attempts_total: int,
+        models_tried: List[str],
+        budget_exhausted: bool,
+        failure_reason: str = "",
+        fast_edit_reason: str = "",
+        fast_edit_method: str = "",
+        fast_edit_file: str = "",
+        fast_edit_replacements: int = 0,
+    ) -> str:
+        _append_tool_stats(
+            ctx,
+            {
+                "ok": bool(ok),
+                "route": route,
+                "fallback_used": bool(fallback_used),
+                "attempts_total": int(max(0, attempts_total)),
+                "retries_used": int(max(0, attempts_total - 1)),
+                "models_tried": models_tried,
+                "budget_exhausted": bool(budget_exhausted),
+                "failure_reason": failure_reason,
+                "fast_edit_reason": fast_edit_reason,
+                "fast_edit_method": fast_edit_method,
+                "fast_edit_file": fast_edit_file,
+                "fast_edit_replacements": int(max(0, fast_edit_replacements)),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
+        return result
+
     if not isinstance(prompt, str) or not prompt.strip():
-        return "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string."
+        return _finish(
+            "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string.",
+            ok=False,
+            route="reject",
+            fallback_used=False,
+            attempts_total=0,
+            models_tried=[],
+            budget_exhausted=False,
+            failure_reason="arg_error",
+        )
     too_large_msg = _format_prompt_too_large_message(prompt)
     if too_large_msg:
-        return too_large_msg
+        return _finish(
+            too_large_msg,
+            ok=False,
+            route="reject",
+            fallback_used=False,
+            attempts_total=0,
+            models_tried=[],
+            budget_exhausted=False,
+            failure_reason="prompt_too_large",
+        )
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     work_dir = str(ctx.repo_dir)
@@ -363,14 +567,57 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if candidate.exists():
             work_dir = str(candidate)
 
-    ctx.emit_progress_fn("Delegating to OpenCode CLI...")
-
     lock = _acquire_git_lock(ctx)
     try:
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            return f"⚠️ GIT_ERROR (checkout): {e}"
+            return _finish(
+                f"⚠️ GIT_ERROR (checkout): {e}",
+                ok=False,
+                route="reject",
+                fallback_used=False,
+                attempts_total=0,
+                models_tried=[],
+                budget_exhausted=False,
+                failure_reason="git_checkout_error",
+            )
+
+        fast_plan = _parse_fast_edit_prompt(prompt)
+        route = "opencode"
+        fallback_used = False
+        fast_edit_reason = str(fast_plan.get("reason") or "") if fast_plan else ""
+        if fast_plan:
+            ctx.emit_progress_fn("Applying fast local edit...")
+            fast = _apply_fast_edit(ctx, work_dir=work_dir, plan=fast_plan)
+            if fast.get("ok"):
+                out = (
+                    "✅ FAST_EDIT_APPLIED: "
+                    f"{fast.get('file')} "
+                    f"(replacements={int(fast.get('replacements_applied') or 0)}, method={fast.get('method')})"
+                )
+                warning = _check_uncommitted_changes(ctx.repo_dir, source="fast-path")
+                if warning:
+                    out += warning
+                out += _run_pytest(ctx.repo_dir)
+                return _finish(
+                    out,
+                    ok=True,
+                    route="fast_path",
+                    fallback_used=False,
+                    attempts_total=0,
+                    models_tried=[],
+                    budget_exhausted=False,
+                    fast_edit_reason=fast_edit_reason,
+                    fast_edit_method=str(fast.get("method") or ""),
+                    fast_edit_file=str(fast.get("file") or ""),
+                    fast_edit_replacements=int(fast.get("replacements_applied") or 0),
+                )
+            route = "fallback_to_opencode"
+            fallback_used = True
+            ctx.emit_progress_fn("Fast local edit failed, delegating to OpenCode CLI...")
+        else:
+            ctx.emit_progress_fn("Delegating to OpenCode CLI...")
 
         full_prompt = (
             f"STRICT: Only modify files inside {work_dir}. "
@@ -395,6 +642,8 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         failed = True
         attempt_notes: List[str] = []
         budget_exhausted = False
+        attempts_total = 0
+        models_tried: List[str] = []
 
         for model in model_attempts:
             model_label = model or "default"
@@ -405,6 +654,9 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                     attempt_notes.append(f"{model_label}#{attempt}:budget_exhausted")
                     break
                 effective_timeout = min(per_attempt_timeout_sec, max(15, remaining - 5))
+                attempts_total += 1
+                if model_label not in models_tried:
+                    models_tried.append(model_label)
                 if model:
                     ctx.emit_progress_fn(
                         f"OpenCode retry with {model_label} (attempt {attempt}/{max_retries})..."
@@ -484,27 +736,53 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                 "3) Test manually: opencode run -m opencode/minimax-m2.5-free \"Reply with exactly: OK\" --format json\n"
             )
             attempts_text = ", ".join(attempt_notes[-10:]) if attempt_notes else "n/a"
-            return (
+            return _finish(
                 f"⚠️ OPENCODE_ERROR: exit={res.returncode if res is not None else 'n/a'}\n"
                 f"Attempts: {attempts_text}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-                f"{budget_note}{help_text}"
+                f"{budget_note}{help_text}",
+                ok=False,
+                route=route,
+                fallback_used=fallback_used,
+                attempts_total=attempts_total,
+                models_tried=models_tried,
+                budget_exhausted=budget_exhausted,
+                failure_reason="opencode_failed",
+                fast_edit_reason=fast_edit_reason,
             )
         if not stdout:
             stdout = "OK: OpenCode completed with empty output."
 
-        warning = _check_uncommitted_changes(ctx.repo_dir)
+        warning = _check_uncommitted_changes(ctx.repo_dir, source="OpenCode")
         if warning:
             stdout += warning
         _emit_opencode_usage_if_available(ctx, stdout)
 
     except Exception as e:
-        return f"⚠️ OPENCODE_FAILED: {type(e).__name__}: {e}"
+        return _finish(
+            f"⚠️ OPENCODE_FAILED: {type(e).__name__}: {e}",
+            ok=False,
+            route="opencode",
+            fallback_used=False,
+            attempts_total=0,
+            models_tried=[],
+            budget_exhausted=False,
+            failure_reason="unexpected_exception",
+        )
     finally:
         _release_git_lock(lock)
 
     result = _parse_opencode_output(stdout)
     result += _run_pytest(ctx.repo_dir)
-    return result
+    return _finish(
+        result,
+        ok=True,
+        route=route,
+        fallback_used=fallback_used,
+        attempts_total=attempts_total,
+        models_tried=models_tried,
+        budget_exhausted=budget_exhausted,
+        fast_edit_reason=fast_edit_reason,
+    )
 
 
 def get_tools() -> List[ToolEntry]:
