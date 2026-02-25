@@ -199,6 +199,7 @@ def _should_skip_auto_resume(
     signature: str,
     now_iso: str,
     dedup_sec: int,
+    restart_ts_iso: Optional[str] = None,
 ) -> bool:
     """Return True when the same auto-resume was already sent recently."""
     if dedup_sec <= 0:
@@ -214,6 +215,11 @@ def _should_skip_auto_resume(
     try:
         now_dt = datetime.datetime.fromisoformat(now_iso)
         last_dt = datetime.datetime.fromisoformat(last_ts)
+        if restart_ts_iso:
+            restart_dt = datetime.datetime.fromisoformat(restart_ts_iso)
+            # New restart cycle: always allow one fresh auto-resume report.
+            if last_dt < restart_dt:
+                return False
         return (now_dt - last_dt).total_seconds() <= float(dedup_sec)
     except Exception:
         return False
@@ -243,8 +249,10 @@ def auto_resume_after_restart() -> None:
         # Check for recent restart (within 2 minutes)
         restart_verify_path = DRIVE_ROOT / "state" / "pending_restart_verify.json"
         recent_restart = False
+        restart_ts_iso: Optional[str] = None
         if restart_verify_path.exists():
             recent_restart = True
+            restart_ts_iso = now_iso
         else:
             # Check supervisor.jsonl for recent restart event
             sup_log = DRIVE_ROOT / "logs" / "supervisor.jsonl"
@@ -257,6 +265,7 @@ def auto_resume_after_restart() -> None:
                         evt = json.loads(line)
                         if evt.get("type") in ("launcher_start", "restart"):
                             recent_restart = True
+                            restart_ts_iso = str(evt.get("ts") or "") or None
                             break
                 except Exception:
                     log.debug("Suppressed exception", exc_info=True)
@@ -265,7 +274,13 @@ def auto_resume_after_restart() -> None:
             return
 
         signature = _auto_resume_signature(int(chat_id), _AUTO_RESUME_TEXT)
-        if _should_skip_auto_resume(st, signature=signature, now_iso=now_iso, dedup_sec=dedup_sec):
+        if _should_skip_auto_resume(
+            st,
+            signature=signature,
+            now_iso=now_iso,
+            dedup_sec=dedup_sec,
+            restart_ts_iso=restart_ts_iso,
+        ):
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
