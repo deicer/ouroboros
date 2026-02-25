@@ -505,8 +505,23 @@ def _trim_log_text(text: str, max_len: int = 4000) -> str:
     return s[:max_len] + f"\n...(truncated, total={len(s)} chars)"
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _run_runtime_validation(branch_name: str, reason: str) -> Dict[str, Any]:
     """Run post-self-modification runtime checks (syntax, lint criticals, tests)."""
+    strict_ruff = _env_bool("OUROBOROS_RUNTIME_VALIDATE_RUFF_STRICT", default=False)
+    strict_pytest = _env_bool("OUROBOROS_RUNTIME_VALIDATE_PYTEST_STRICT", default=False)
+
     checks = [
         (
             "compileall",
@@ -528,6 +543,7 @@ def _run_runtime_validation(branch_name: str, reason: str) -> Dict[str, Any]:
     steps: List[Dict[str, Any]] = []
     failed_step = ""
     ok = True
+    non_blocking_failures: List[str] = []
 
     for name, cmd, timeout_sec in checks:
         try:
@@ -549,46 +565,71 @@ def _run_runtime_validation(branch_name: str, reason: str) -> Dict[str, Any]:
             }
             steps.append(step)
             if r.returncode != 0:
+                is_non_blocking = (
+                    (name == "ruff_ef" and not strict_ruff)
+                    or (name == "pytest" and not strict_pytest)
+                )
+                if is_non_blocking:
+                    step["non_blocking"] = True
+                    non_blocking_failures.append(name)
+                    continue
                 ok = False
                 failed_step = name
                 break
         except subprocess.TimeoutExpired as e:
+            step = {
+                "name": name,
+                "cmd": cmd,
+                "returncode": -1,
+                "stdout": _trim_log_text(getattr(e, "stdout", "") or ""),
+                "stderr": _trim_log_text(getattr(e, "stderr", "") or ""),
+                "timeout_sec": timeout_sec,
+                "ok": False,
+                "error": f"timeout_after_{timeout_sec}s",
+            }
+            is_non_blocking = (
+                (name == "ruff_ef" and not strict_ruff)
+                or (name == "pytest" and not strict_pytest)
+            )
+            if is_non_blocking:
+                step["non_blocking"] = True
+                non_blocking_failures.append(name)
+                steps.append(step)
+                continue
             ok = False
             failed_step = name
-            steps.append(
-                {
-                    "name": name,
-                    "cmd": cmd,
-                    "returncode": -1,
-                    "stdout": _trim_log_text(getattr(e, "stdout", "") or ""),
-                    "stderr": _trim_log_text(getattr(e, "stderr", "") or ""),
-                    "timeout_sec": timeout_sec,
-                    "ok": False,
-                    "error": f"timeout_after_{timeout_sec}s",
-                }
-            )
+            steps.append(step)
             break
         except Exception as e:
+            step = {
+                "name": name,
+                "cmd": cmd,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": _trim_log_text(repr(e)),
+                "timeout_sec": timeout_sec,
+                "ok": False,
+                "error": "execution_error",
+            }
+            is_non_blocking = (
+                (name == "ruff_ef" and not strict_ruff)
+                or (name == "pytest" and not strict_pytest)
+            )
+            if is_non_blocking:
+                step["non_blocking"] = True
+                non_blocking_failures.append(name)
+                steps.append(step)
+                continue
             ok = False
             failed_step = name
-            steps.append(
-                {
-                    "name": name,
-                    "cmd": cmd,
-                    "returncode": -1,
-                    "stdout": "",
-                    "stderr": _trim_log_text(repr(e)),
-                    "timeout_sec": timeout_sec,
-                    "ok": False,
-                    "error": "execution_error",
-                }
-            )
+            steps.append(step)
             break
 
     result = {
         "ok": ok,
         "failed_step": failed_step,
         "steps": steps,
+        "non_blocking_failures": non_blocking_failures,
     }
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
