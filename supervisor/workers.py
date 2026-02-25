@@ -180,11 +180,12 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
 # ---------------------------------------------------------------------------
 
 _AUTO_RESUME_TEXT = (
-    "[auto-resume after restart] Continue the latest unfinished work item. "
-    "Use Recent thinking trace, Recent progress, Recent chat, goals.json, and scratchpad. "
-    "Do NOT send a generic 'restored context' summary. "
-    "First do one concrete next action, then report only factual updates with timestamps. "
-    "If context is unclear, explicitly say what is unknown."
+    "[auto-resume after restart] Продолжай последнюю незавершённую работу. "
+    "Используй Recent thinking trace, Recent progress, Recent chat, goals.json и scratchpad. "
+    "Не отправляй шаблонный отчёт «я восстановил контекст». "
+    "Сначала сделай один конкретный следующий шаг, затем дай краткий фактологичный апдейт с таймстампами. "
+    "Отвечай пользователю только на русском языке. "
+    "Если контекст неясен — прямо напиши, что именно неизвестно."
 )
 
 
