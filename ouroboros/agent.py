@@ -40,6 +40,56 @@ from ouroboros.loop import run_llm_loop
 _worker_boot_logged = False
 _worker_boot_lock = threading.Lock()
 
+_LOOP_GUARD_EN_MARKERS = (
+    "stuck in repeated identical tool batches",
+    "stuck in repeated tool errors",
+)
+_LOOP_GUARD_USER_TEXT_RU = (
+    "⚠️ Я зациклился на одинаковых действиях и остановился, чтобы не тратить бюджет."
+)
+
+
+def _split_user_and_log_text(text: str) -> Tuple[str, str]:
+    """Keep rich diagnostics for logs, but send concise Russian guard text to user."""
+    raw_text = str(text or "")
+    low = raw_text.lower()
+    if any(marker in low for marker in _LOOP_GUARD_EN_MARKERS):
+        return _LOOP_GUARD_USER_TEXT_RU, raw_text
+    return raw_text, raw_text
+
+
+def _is_auto_resume_task(task: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(task, dict):
+        return False
+    task_text = str(task.get("text") or "")
+    return task_text.startswith("[auto-resume after restart]")
+
+
+def _strip_background_preamble_for_user(text: str, task: Optional[Dict[str, Any]]) -> str:
+    """
+    Remove leaked "background cycle" sections from direct user replies.
+
+    Keep auto-resume reports unchanged because they are expected to be status-heavy.
+    """
+    if _is_auto_resume_task(task):
+        return text
+    raw = str(text or "")
+    low = raw.lower()
+    if "## фоновый цикл" not in low:
+        return raw
+
+    # Common pattern: leaked background report + explicit answer section.
+    markers = ("## Ответ", "## ответ", "**Ответ:**", "**ответ:**")
+    for marker in markers:
+        idx = raw.find(marker)
+        if idx >= 0:
+            cleaned = raw[idx:].strip()
+            if cleaned:
+                return cleaned
+
+    # No explicit answer section found — avoid leaking internal background report.
+    return "⚠️ Внутренний отчёт не должен был попасть в чат. Повтори запрос, отвечу по делу."
+
 
 # ---------------------------------------------------------------------------
 # Environment + Paths
@@ -493,9 +543,13 @@ class OuroborosAgent:
         # that would double-count in update_budget_from_usage.
         # Cost/token summaries are carried by task_metrics and task_done events.
 
+        sanitized_for_user = _strip_background_preamble_for_user(text, task)
+        user_text, log_text = _split_user_and_log_text(sanitized_for_user)
+        # Keep full model output for diagnostics even when user text is sanitized.
+        log_text = str(text or "")
         self._pending_events.append({
             "type": "send_message", "chat_id": task["chat_id"],
-            "text": text or "\u200b", "log_text": text or "",
+            "text": user_text or "\u200b", "log_text": log_text or "",
             "format": "markdown",
             "task_id": task.get("id"), "ts": utc_now_iso(),
         })
