@@ -243,9 +243,10 @@ if not _init_st.get("initialized"):
     _arch_path = REPO_DIR / "ARCHITECTURE.md"
     if not _arch_path.exists():
         _arch_path.write_text(
-            "# Architecture\n\n"
-            "This file describes the technical architecture of Ouroboros.\n"
-            "Maintained by the agent. See BIBLE.md section 8.\n",
+            "# Архитектура Ouroboros\n\n"
+            "Техническая архитектура системы. Документ поддерживается агентом.\n\n"
+            "## 12. Журнал архитектурных изменений (авто, append-only)\n\n"
+            "Ниже агент автоматически дописывает записи после автономных code-change задач.\n",
             encoding="utf-8",
         )
     # Create IMPROVE.md if missing

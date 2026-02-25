@@ -14,7 +14,7 @@ import os
 import sys
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Lazy imports to avoid circular dependencies — everything comes through ctx
 
@@ -145,6 +145,137 @@ def _append_evolution_lesson(evt: Dict[str, Any], ctx: Any) -> None:
         "- Следующий шаг: закрепить успешный паттерн в коде/промпте и добавить тест при необходимости.\n"
     )
     improve_path.write_text(current + lesson, encoding="utf-8")
+
+
+def _ensure_architecture_doc_exists(ctx: Any) -> Any:
+    """Ensure ARCHITECTURE.md exists with a non-empty scaffold."""
+    arch_path = ctx.REPO_DIR / "ARCHITECTURE.md"
+    if arch_path.exists():
+        return arch_path
+    arch_path.write_text(
+        "# Архитектура Ouroboros\n\n"
+        "Этот документ описывает архитектуру системы и поддерживается агентом.\n\n"
+        "## 12. Журнал архитектурных изменений (авто, append-only)\n\n"
+        "Ниже агент автоматически дописывает записи после автономных code-change задач.\n",
+        encoding="utf-8",
+    )
+    return arch_path
+
+
+def _collect_task_commit_info(task_id: str, ctx: Any) -> Dict[str, Any]:
+    """
+    Collect commit metadata for a task from tools.jsonl.
+
+    We treat `repo_commit_push` with result containing
+    `OK: committed and pushed` as successful code-change evidence.
+    """
+    info: Dict[str, Any] = {
+        "had_successful_commit": False,
+        "commit_events": 0,
+        "commit_messages": [],
+    }
+    if not task_id:
+        return info
+    try:
+        from ouroboros.memory import Memory
+
+        mem = Memory(drive_root=ctx.DRIVE_ROOT)
+        entries = mem.read_jsonl_tail("tools.jsonl", max_entries=1200)
+        seen_messages = set()
+        commit_messages: List[str] = []
+        for e in entries:
+            if str(e.get("task_id") or "") != task_id:
+                continue
+            if str(e.get("tool") or "") != "repo_commit_push":
+                continue
+            info["commit_events"] = int(info["commit_events"]) + 1
+            args = e.get("args") or {}
+            if isinstance(args, dict):
+                msg = str(args.get("commit_message") or "").strip()
+                if msg and msg not in seen_messages:
+                    seen_messages.add(msg)
+                    commit_messages.append(msg)
+            result_preview = str(e.get("result_preview") or "")
+            if (
+                "OK: committed and pushed" in result_preview
+                or "Committed locally but NOT pushed" in result_preview
+            ):
+                info["had_successful_commit"] = True
+        info["commit_messages"] = commit_messages
+    except Exception:
+        log.debug("Failed to collect commit info for task %s", task_id, exc_info=True)
+    return info
+
+
+def _append_architecture_change_entry(evt: Dict[str, Any], ctx: Any) -> bool:
+    """Append architecture change journal entry when autonomous task changed code."""
+    task_id = str(evt.get("task_id") or "").strip()
+    if not task_id:
+        return False
+
+    commit_info = _collect_task_commit_info(task_id, ctx)
+    if not bool(commit_info.get("had_successful_commit")):
+        return False
+
+    arch_path = _ensure_architecture_doc_exists(ctx)
+    marker = f"architecture-task:{task_id}"
+    try:
+        current = arch_path.read_text(encoding="utf-8")
+    except Exception:
+        current = ""
+    if marker in current:
+        return False
+
+    ts_raw = str(evt.get("ts") or datetime.datetime.now(datetime.timezone.utc).isoformat())
+    ts_human = ts_raw.replace("T", " ")
+    task_type = str(evt.get("task_type") or "")
+    cost = round(float(evt.get("cost_usd") or 0.0), 4)
+    rounds = int(evt.get("total_rounds") or 0)
+    preview = _extract_task_result_preview(task_id, ctx)
+    commit_messages = [str(x).strip() for x in (commit_info.get("commit_messages") or []) if str(x).strip()]
+
+    commits_block = "- (commit_message недоступен в tools.jsonl)"
+    if commit_messages:
+        commits_block = "\n".join(f"- `{msg}`" for msg in commit_messages[:5])
+
+    journal_header = "## 12. Журнал архитектурных изменений (авто, append-only)"
+    if journal_header not in current:
+        current = current.rstrip() + (
+            "\n\n"
+            "## 12. Журнал архитектурных изменений (авто, append-only)\n\n"
+            "Ниже агент автоматически дописывает записи после автономных code-change задач.\n"
+        )
+
+    entry = (
+        f"\n\n<!-- {marker} -->\n"
+        f"### {ts_human} — Автообновление архитектуры\n"
+        f"- Task: `{task_id}`\n"
+        f"- Task type: `{task_type or 'unknown'}`\n"
+        f"- Метрики выполнения: cost=${cost}, rounds={rounds}\n"
+        "- Причина записи: зафиксирован успешный `repo_commit_push` в автономной задаче.\n"
+        "- Commit messages:\n"
+        f"{commits_block}\n"
+    )
+    if preview:
+        entry += f"- Краткий итог задачи: {preview}\n"
+    entry += "- Следующий шаг: сверить README/тесты, если контракт или поведение изменились.\n"
+
+    arch_path.write_text(current + entry, encoding="utf-8")
+    try:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "events.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "architecture_doc_updated",
+                "task_id": task_id,
+                "task_type": task_type,
+                "commit_events": int(commit_info.get("commit_events") or 0),
+                "commit_messages": commit_messages[:5],
+            },
+        )
+    except Exception:
+        log.debug("Failed to emit architecture_doc_updated event", exc_info=True)
+    return True
 
 
 def _detect_evolution_error_signal(task_id: str, ctx: Any) -> str:
@@ -279,6 +410,12 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             _append_evolution_lesson(evt, ctx)
         except Exception:
             log.warning("Failed to append evolution lesson to IMPROVE.md", exc_info=True)
+
+    if task_type in {"evolution", "review", "consciousness"}:
+        try:
+            _append_architecture_change_entry(evt, ctx)
+        except Exception:
+            log.warning("Failed to append architecture change entry", exc_info=True)
 
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
