@@ -9,7 +9,7 @@ def test_loop_guard_message_is_short_russian_for_user():
         "Recurring signature: repo_read|args=... Stopping to avoid loop."
     )
     user_text, log_text = _split_user_and_log_text(source)
-    assert user_text.startswith("⚠️ Я зациклился")
+    assert user_text.startswith("⚠️ Обнаружен цикл")
     assert "repeated identical tool batches" in log_text
 
 

@@ -276,6 +276,25 @@ def _resolve_model_context_window(model: str) -> int:
     return best_window
 
 
+def _loop_guard_hard_stop_allowed(active_model: str) -> bool:
+    """
+    Decide whether repeated-loop guards should hard-stop the task.
+
+    Default policy:
+    - paid models: hard-stop enabled
+    - free models: try recovery first, no hard-stop
+    """
+    if _env_bool("OUROBOROS_LOOP_GUARD_ALWAYS_STOP", default=False):
+        return True
+    if is_free_model(active_model):
+        return _env_bool("OUROBOROS_LOOP_GUARD_STOP_ON_FREE", default=False)
+    return True
+
+
+def _loop_guard_free_recovery_limit() -> int:
+    return max(1, _env_int("OUROBOROS_LOOP_GUARD_FREE_RECOVERY_LIMIT", 3))
+
+
 def _append_thinking_trace(
     drive_logs: pathlib.Path,
     *,
@@ -612,6 +631,10 @@ def _check_budget_limits(
     # This keeps the bot operational even when external budget telemetry reports 0.
     if budget_remaining_usd is None or budget_remaining_usd <= 0:
         return None
+    # Budget guard applies only to paid models by default.
+    # On free models the agent should keep working.
+    if is_free_model(active_model) and not _env_bool("OUROBOROS_BUDGET_GUARD_ON_FREE", default=False):
+        return None
 
     task_cost = accumulated_usage.get("cost", 0)
     budget_pct = task_cost / budget_remaining_usd
@@ -925,6 +948,9 @@ def run_llm_loop(
     # Anti-loop guards: repeated errors and repeated identical tool batches.
     recent_error_sigs: deque[str] = deque(maxlen=12)
     recent_batch_sigs: deque[str] = deque(maxlen=12)
+    free_guard_recovery_limit = _loop_guard_free_recovery_limit()
+    free_error_recoveries = 0
+    free_batch_recoveries = 0
     try:
         repeated_error_threshold = max(2, int(os.environ.get("OUROBOROS_REPEAT_ERROR_THRESHOLD", "4")))
     except (ValueError, TypeError):
@@ -1209,11 +1235,53 @@ def run_llm_loop(
                 if len(recent_error_sigs) >= repeated_error_window_min:
                     top_sig, top_count = Counter(recent_error_sigs).most_common(1)[0]
                     if top_count >= repeated_error_threshold:
+                        hard_stop = _loop_guard_hard_stop_allowed(active_model)
+                        if (not hard_stop) and free_error_recoveries < free_guard_recovery_limit:
+                            free_error_recoveries += 1
+                            recover_msg = (
+                                "♻️ Обнаружил повтор ошибок инструментов на free-модели. "
+                                "Меняю стратегию и продолжаю."
+                            )
+                            emit_progress(recover_msg)
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "[ANTI_LOOP] Ты повторяешь одни и те же ошибки инструментов. "
+                                    "Немедленно смени подход: не вызывай тот же инструмент с теми же аргументами. "
+                                    "Либо выбери другой инструмент/последовательность, либо дай финальный ответ с "
+                                    "чётким объяснением ограничения."
+                                ),
+                            })
+                            recent_error_sigs.clear()
+                            _append_thinking_trace(
+                                drive_logs,
+                                source="task_loop",
+                                step="repeated_error_guard_recover",
+                                task_id=task_id,
+                                task_type=task_type or "task",
+                                round_idx=round_idx,
+                                details={
+                                    "mode": "continue",
+                                    "active_model": active_model,
+                                    "recovery_no": free_error_recoveries,
+                                    "recovery_limit": free_guard_recovery_limit,
+                                },
+                            )
+                            append_jsonl(drive_logs / "events.jsonl", {
+                                "ts": utc_now_iso(),
+                                "type": "task_loop_guard_recover",
+                                "task_id": task_id,
+                                "reason": "repeated_tool_errors",
+                                "mode": "continue",
+                                "model": active_model,
+                                "recovery_no": int(free_error_recoveries),
+                            })
+                            continue
                         final = (
-                            f"⚠️ Stuck in repeated tool errors ({top_count} repeats in "
-                            f"last {len(recent_error_sigs)} rounds). "
-                            f"Last recurring error: {truncate_for_log(top_sig, 260)}. "
-                            "Stopping to avoid loop. Please adjust approach or tool availability."
+                            f"⚠️ Обнаружены повторяющиеся ошибки инструментов ({top_count} повторов за "
+                            f"{len(recent_error_sigs)} раундов). "
+                            f"Последняя сигнатура: {truncate_for_log(top_sig, 260)}. "
+                            "Останавливаю текущий цикл. Нужна новая формулировка или изменение ограничений."
                         )
                         _append_thinking_trace(
                             drive_logs,
@@ -1250,11 +1318,52 @@ def run_llm_loop(
                     window_min=repeated_batch_window_min,
                 )
                 if stop:
+                    hard_stop = _loop_guard_hard_stop_allowed(active_model)
+                    if (not hard_stop) and free_batch_recoveries < free_guard_recovery_limit:
+                        free_batch_recoveries += 1
+                        recover_msg = (
+                            "♻️ Обнаружил цикл одинаковых действий на free-модели. "
+                            "Сменил стратегию и продолжаю."
+                        )
+                        emit_progress(recover_msg)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "[ANTI_LOOP] Ты повторяешь один и тот же пакет инструментов с одинаковыми аргументами "
+                                "и результатами. Немедленно измени план: не повторяй этот пакет. "
+                                "Либо используй другие инструменты, либо дай финальный ответ с тем, что блокирует задачу."
+                            ),
+                        })
+                        recent_batch_sigs.clear()
+                        _append_thinking_trace(
+                            drive_logs,
+                            source="task_loop",
+                            step="repeated_tool_guard_recover",
+                            task_id=task_id,
+                            task_type=task_type or "task",
+                            round_idx=round_idx,
+                            details={
+                                "mode": "continue",
+                                "active_model": active_model,
+                                "recovery_no": free_batch_recoveries,
+                                "recovery_limit": free_guard_recovery_limit,
+                            },
+                        )
+                        append_jsonl(drive_logs / "events.jsonl", {
+                            "ts": utc_now_iso(),
+                            "type": "task_loop_guard_recover",
+                            "task_id": task_id,
+                            "reason": "repeated_tool_batch",
+                            "mode": "continue",
+                            "model": active_model,
+                            "recovery_no": int(free_batch_recoveries),
+                        })
+                        continue
                     final = (
-                        f"⚠️ Stuck in repeated identical tool batches ({top_count} repeats in "
-                        f"last {len(recent_batch_sigs)} rounds). "
-                        f"Recurring signature: {truncate_for_log(top_sig, 260)}. "
-                        "Stopping to avoid loop. Please change approach or inspect constraints."
+                        f"⚠️ Обнаружен цикл одинаковых действий ({top_count} повторов за "
+                        f"{len(recent_batch_sigs)} раундов). "
+                        f"Сигнатура: {truncate_for_log(top_sig, 260)}. "
+                        "Останавливаю текущий цикл. Нужна смена подхода или уточнение ограничений."
                     )
                     _append_thinking_trace(
                         drive_logs,

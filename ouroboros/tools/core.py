@@ -98,7 +98,9 @@ def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
         return f"⚠️ repo_read expects a file, got directory: {rel.as_posix()}. Use repo_list."
     if not file_path.exists():
         return f"⚠️ File not found: {path} (resolved: {file_path})"
-    return _apply_read_limit(read_text(file_path), limit)
+    # Intentional: repo_read always returns full file content.
+    # `limit` is kept in signature only for backward compatibility with old callers.
+    return read_text(file_path)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
@@ -403,7 +405,6 @@ def get_tools() -> List[ToolEntry]:
             "description": "Read a UTF-8 text file from the GitHub repo (relative path; absolute /app/... also accepted).",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "limit": {"type": "integer", "description": "Optional max output chars for compatibility with legacy callers."},
             }, "required": ["path"]},
         }, _repo_read),
         ToolEntry("repo_list", {

@@ -23,7 +23,7 @@ def test_drive_read_accepts_absolute_data_path():
         assert out == "hello-drive"
 
 
-def test_repo_read_accepts_absolute_app_path_and_limit():
+def test_repo_read_ignores_limit_and_returns_full_content():
     with tempfile.TemporaryDirectory() as td:
         repo = pathlib.Path(td) / "repo"
         drive = pathlib.Path(td) / "data"
@@ -34,8 +34,7 @@ def test_repo_read_accepts_absolute_app_path_and_limit():
 
         ctx = _mk_ctx(repo, drive)
         out = _repo_read(ctx, str(fp), limit=3)
-        assert out.startswith("abc")
-        assert "truncated at 3 chars" in out
+        assert out == "abcdef"
 
 
 def test_repo_read_maps_legacy_app_tools_path_to_package_layout():
