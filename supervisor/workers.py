@@ -245,6 +245,9 @@ def auto_resume_after_restart() -> None:
             dedup_sec = max(60, int(str(os.environ.get("OUROBOROS_AUTO_RESUME_DEDUP_SEC", "900")).strip()))
         except (TypeError, ValueError):
             dedup_sec = 900
+        force_report_after_restart = str(
+            os.environ.get("OUROBOROS_AUTO_RESUME_FORCE_REPORT", "1")
+        ).strip().lower() not in {"0", "false", "no", "off"}
 
         # Check for recent restart (within 2 minutes)
         restart_verify_path = DRIVE_ROOT / "state" / "pending_restart_verify.json"
@@ -274,12 +277,15 @@ def auto_resume_after_restart() -> None:
             return
 
         signature = _auto_resume_signature(int(chat_id), _AUTO_RESUME_TEXT)
-        if _should_skip_auto_resume(
-            st,
-            signature=signature,
-            now_iso=now_iso,
-            dedup_sec=dedup_sec,
-            restart_ts_iso=restart_ts_iso,
+        if (
+            not force_report_after_restart
+            and _should_skip_auto_resume(
+                st,
+                signature=signature,
+                now_iso=now_iso,
+                dedup_sec=dedup_sec,
+                restart_ts_iso=restart_ts_iso,
+            )
         ):
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
