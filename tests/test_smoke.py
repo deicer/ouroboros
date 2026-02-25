@@ -11,6 +11,7 @@ Tests core invariants:
 Run: python -m pytest tests/test_smoke.py -v
 """
 import ast
+import json
 import os
 import pathlib
 import re
@@ -280,6 +281,80 @@ def test_memory_persistence():
         mem2 = Memory(drive_root=tmp_path)
         content = mem2.load_scratchpad()
         assert "test persistence content" in content, "Memory should persist across instances"
+
+
+def test_memory_summarize_thinking_trace_filters_by_task():
+    """Thinking trace summary should include only requested task entries."""
+    from ouroboros.memory import Memory
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp)
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "thinking_trace.jsonl").write_text(
+            "\n".join([
+                json.dumps({
+                    "ts": "2026-02-25T08:00:00+00:00",
+                    "source": "task_loop",
+                    "step": "round_start",
+                    "task_id": "task-a",
+                    "round": 2,
+                    "details": {"active_model": "model-a"},
+                }, ensure_ascii=False),
+                json.dumps({
+                    "ts": "2026-02-25T08:00:01+00:00",
+                    "source": "task_loop",
+                    "step": "tool_result",
+                    "task_id": "task-a",
+                    "round": 2,
+                    "details": {"tool": "run_shell", "result_preview": "exit_code=0"},
+                }, ensure_ascii=False),
+                json.dumps({
+                    "ts": "2026-02-25T08:00:02+00:00",
+                    "source": "task_loop",
+                    "step": "round_start",
+                    "task_id": "task-b",
+                    "round": 1,
+                    "details": {"active_model": "model-b"},
+                }, ensure_ascii=False),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        mem = Memory(drive_root=tmp_path)
+        summary = mem.summarize_thinking_trace(
+            mem.read_jsonl_tail("thinking_trace.jsonl", 20),
+            limit=20,
+            task_id="task-a",
+        )
+        assert "task_loop.round_start" in summary
+        assert "run_shell" in summary
+        assert "task-b" not in summary
+
+
+def test_context_recent_sections_include_thinking_trace():
+    """Recent context should include a compact thinking trace section."""
+    from ouroboros.memory import Memory
+    from ouroboros.context import _build_recent_sections
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = pathlib.Path(tmp)
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "thinking_trace.jsonl").write_text(
+            json.dumps({
+                "ts": "2026-02-25T08:00:00+00:00",
+                "source": "task_loop",
+                "step": "llm_response",
+                "task_id": "t-1",
+                "details": {"assistant_preview": "Investigating opencode timeout"},
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        mem = Memory(drive_root=tmp_path)
+        sections = _build_recent_sections(mem, env=None, task_id="t-1")
+        joined = "\n\n".join(sections)
+        assert "## Recent thinking trace" in joined
+        assert "Investigating opencode timeout" in joined
 
 
 # ── Context builder ─────────────────────────────────────────────

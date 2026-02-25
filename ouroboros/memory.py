@@ -241,6 +241,70 @@ class Memory:
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
 
+    def summarize_thinking_trace(
+        self,
+        entries: List[Dict[str, Any]],
+        limit: int = 30,
+        task_id: str = "",
+    ) -> str:
+        """Summarize recent thinking_trace events in a compact, restart-friendly form."""
+        if not entries:
+            return ""
+
+        filtered: List[Dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            tid = str(e.get("task_id") or "")
+            if task_id and tid != task_id:
+                continue
+            filtered.append(e)
+
+        if not filtered:
+            return ""
+
+        lines: List[str] = []
+        for e in filtered[-max(1, limit):]:
+            ts_full = str(e.get("ts") or "")
+            ts_hms = ts_full[11:19] if len(ts_full) >= 19 else ts_full
+            source = str(e.get("source") or "unknown")
+            step = str(e.get("step") or "unknown")
+            round_idx = e.get("round")
+            tid = str(e.get("task_id") or "")
+            details = e.get("details") if isinstance(e.get("details"), dict) else {}
+
+            bits: List[str] = []
+            if round_idx not in (None, ""):
+                bits.append(f"r{round_idx}")
+            if tid:
+                bits.append(f"task={short(tid, 12)}")
+            if "active_model" in details:
+                bits.append(f"model={short(str(details.get('active_model')), 40)}")
+            if "tool" in details:
+                bits.append(f"tool={short(str(details.get('tool')), 40)}")
+
+            tool_names = details.get("tool_names")
+            if isinstance(tool_names, list) and tool_names:
+                shown = [str(x) for x in tool_names[:3]]
+                extra = f"+{len(tool_names) - 3}" if len(tool_names) > 3 else ""
+                bits.append(f"tools={','.join(shown)}{extra}")
+
+            preview = ""
+            for k in ("assistant_preview", "response_preview", "result_preview", "thought_preview", "error"):
+                raw = details.get(k)
+                if raw:
+                    preview = short(str(raw).replace("\n", " "), 180)
+                    break
+            if preview:
+                bits.append(preview)
+
+            line = f"• {ts_hms} {source}.{step}"
+            if bits:
+                line += " | " + " | ".join(bits)
+            lines.append(line)
+
+        return "\n".join(lines)
+
     def append_journal(self, entry: Dict[str, Any]) -> None:
         append_jsonl(self.journal_path(), entry)
 

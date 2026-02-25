@@ -423,6 +423,19 @@ class BackgroundConsciousness:
             if summary_text.strip():
                 parts.append("## Dialogue Summary\n\n" + clip_text(summary_text, 4000))
 
+        # Recent thinking trace helps warm-start after restart.
+        try:
+            from ouroboros.memory import Memory
+            mem = Memory(drive_root=self._drive_root)
+            thinking_summary = mem.summarize_thinking_trace(
+                mem.read_jsonl_tail("thinking_trace.jsonl", 300),
+                limit=20,
+            )
+            if thinking_summary:
+                parts.append("## Recent thinking trace\n\n" + clip_text(thinking_summary, 4000))
+        except Exception:
+            log.debug("Failed to load recent thinking trace for consciousness context", exc_info=True)
+
         # Recent observations
         observations = []
         while not self._observations.empty():

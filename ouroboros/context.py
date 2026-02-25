@@ -164,6 +164,19 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
     if supervisor_summary:
         sections.append("## Supervisor\n\n" + supervisor_summary)
 
+    thinking_entries = memory.read_jsonl_tail("thinking_trace.jsonl", 400)
+    thinking_summary = memory.summarize_thinking_trace(
+        thinking_entries, limit=30, task_id=task_id
+    )
+    if not thinking_summary and task_id:
+        # Fallback for restart continuity: when current task is new,
+        # still provide the latest global trace.
+        thinking_summary = memory.summarize_thinking_trace(
+            thinking_entries, limit=30, task_id=""
+        )
+    if thinking_summary:
+        sections.append("## Recent thinking trace\n\n" + thinking_summary)
+
     return sections
 
 
@@ -446,7 +459,10 @@ def apply_message_token_soft_cap(
         return messages, info
 
     # Prune log summaries from the dynamic text block in multipart system messages
-    prunable = ["## Recent chat", "## Recent progress", "## Recent tools", "## Recent events", "## Supervisor"]
+    prunable = [
+        "## Recent chat", "## Recent progress", "## Recent tools",
+        "## Recent events", "## Supervisor", "## Recent thinking trace",
+    ]
     pruned = copy.deepcopy(messages)
     for prefix in prunable:
         if estimated <= soft_cap_tokens:
