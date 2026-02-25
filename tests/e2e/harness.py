@@ -14,7 +14,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
@@ -50,10 +50,11 @@ def git_diff_from_initial(repo_dir: Path) -> str:
 class E2EHarness:
     """Sets up and runs an Ouroboros agent in an isolated environment."""
 
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, use_mock_llm: bool = False):
         self.work_dir = work_dir
         self.repo_dir = work_dir / "repo"
         self.drive_root = work_dir / "data"
+        self.use_mock_llm = bool(use_mock_llm)
         self._setup_done = False
         self._agent = None
         self._owner_messages: List[str] = []
@@ -96,6 +97,9 @@ class E2EHarness:
             repo_dir=str(self.repo_dir),
             drive_root=str(self.drive_root),
         )
+        if self.use_mock_llm:
+            from tests.fixtures.mock_llm import MockLLMClient
+            agent.llm = MockLLMClient(repo_dir=self.repo_dir, drive_root=self.drive_root)
 
         # 5. Override dangerous tools
         def _noop_handler(ctx, **kwargs):
