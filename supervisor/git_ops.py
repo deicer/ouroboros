@@ -16,10 +16,13 @@ import shutil
 import subprocess
 import sys
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from supervisor.state import (
-    load_state, save_state, append_jsonl, atomic_write_text,
+    append_jsonl,
+    atomic_write_text,
+    load_state,
+    save_state,
 )
 
 log = logging.getLogger(__name__)
@@ -495,6 +498,113 @@ def import_test() -> Dict[str, Any]:
             "returncode": r.returncode}
 
 
+def _trim_log_text(text: str, max_len: int = 4000) -> str:
+    s = str(text or "")
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + f"\n...(truncated, total={len(s)} chars)"
+
+
+def _run_runtime_validation(branch_name: str, reason: str) -> Dict[str, Any]:
+    """Run post-self-modification runtime checks (syntax, lint criticals, tests)."""
+    checks = [
+        (
+            "compileall",
+            [sys.executable, "-m", "compileall", "-q", "launcher.py", "ouroboros", "supervisor", "tests"],
+            180,
+        ),
+        (
+            "ruff_ef",
+            [sys.executable, "-m", "ruff", "check", "--select=E,F", "launcher.py", "ouroboros", "supervisor", "tests"],
+            180,
+        ),
+        (
+            "pytest",
+            [sys.executable, "-m", "pytest", "tests/", "-x", "-q"],
+            600,
+        ),
+    ]
+
+    steps: List[Dict[str, Any]] = []
+    failed_step = ""
+    ok = True
+
+    for name, cmd, timeout_sec in checks:
+        try:
+            r = subprocess.run(
+                cmd,
+                cwd=str(REPO_DIR),
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            step = {
+                "name": name,
+                "cmd": cmd,
+                "returncode": int(r.returncode),
+                "stdout": _trim_log_text(r.stdout or ""),
+                "stderr": _trim_log_text(r.stderr or ""),
+                "timeout_sec": timeout_sec,
+                "ok": bool(r.returncode == 0),
+            }
+            steps.append(step)
+            if r.returncode != 0:
+                ok = False
+                failed_step = name
+                break
+        except subprocess.TimeoutExpired as e:
+            ok = False
+            failed_step = name
+            steps.append(
+                {
+                    "name": name,
+                    "cmd": cmd,
+                    "returncode": -1,
+                    "stdout": _trim_log_text(getattr(e, "stdout", "") or ""),
+                    "stderr": _trim_log_text(getattr(e, "stderr", "") or ""),
+                    "timeout_sec": timeout_sec,
+                    "ok": False,
+                    "error": f"timeout_after_{timeout_sec}s",
+                }
+            )
+            break
+        except Exception as e:
+            ok = False
+            failed_step = name
+            steps.append(
+                {
+                    "name": name,
+                    "cmd": cmd,
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": _trim_log_text(repr(e)),
+                    "timeout_sec": timeout_sec,
+                    "ok": False,
+                    "error": "execution_error",
+                }
+            )
+            break
+
+    result = {
+        "ok": ok,
+        "failed_step": failed_step,
+        "steps": steps,
+    }
+    append_jsonl(
+        DRIVE_ROOT / "logs" / "supervisor.jsonl",
+        {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "type": "safe_restart_runtime_validation",
+            "reason": reason,
+            "branch": branch_name,
+            "ok": ok,
+            "failed_step": failed_step,
+            "steps": steps,
+        },
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Safe restart orchestration
 # ---------------------------------------------------------------------------
@@ -504,7 +614,7 @@ def safe_restart(
     unsynced_policy: str = "rescue_and_reset",
 ) -> Tuple[bool, str]:
     """
-    Attempt to checkout dev branch, sync deps, and verify imports.
+    Attempt to checkout dev branch, sync deps, verify imports, and run runtime validation.
     Falls back to stable branch if dev fails.
 
     Args:
@@ -527,21 +637,35 @@ def safe_restart(
 
     t = import_test()
     if t["ok"]:
-        return True, f"OK: {BRANCH_DEV}"
+        validation = _run_runtime_validation(branch_name=BRANCH_DEV, reason=reason)
+        if validation.get("ok"):
+            return True, f"OK: {BRANCH_DEV}"
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "safe_restart_dev_validation_failed",
+                "reason": reason,
+                "branch": BRANCH_DEV,
+                "failed_step": validation.get("failed_step") or "",
+                "steps": validation.get("steps") or [],
+            },
+        )
 
     # Dev branch failed import — log the failure and fall back to latest stable tag
-    append_jsonl(
-        DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "type": "safe_restart_dev_import_failed",
-            "reason": reason,
-            "branch": BRANCH_DEV,
-            "stdout": t.get("stdout", ""),
-            "stderr": t.get("stderr", ""),
-            "returncode": t.get("returncode", -1),
-        },
-    )
+    if not t["ok"]:
+        append_jsonl(
+            DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "safe_restart_dev_import_failed",
+                "reason": reason,
+                "branch": BRANCH_DEV,
+                "stdout": t.get("stdout", ""),
+                "stderr": t.get("stderr", ""),
+                "returncode": t.get("returncode", -1),
+            },
+        )
 
     # Fallback: find latest stable tag and reset to it
     rc_tag, tag_out, tag_err = git_capture(
@@ -562,7 +686,10 @@ def safe_restart(
             return False, f"Failed deps after fallback to {latest_tag}: {deps_msg_s}"
         t2 = import_test()
         if t2["ok"]:
-            return True, f"OK: fell back to tag {latest_tag}"
+            validation2 = _run_runtime_validation(branch_name=latest_tag, reason=f"{reason}_fallback_tag")
+            if validation2.get("ok"):
+                return True, f"OK: fell back to tag {latest_tag}"
+            return False, f"Fallback tag {latest_tag} failed validation: {validation2.get('failed_step') or 'unknown'}"
         return False, f"Tag {latest_tag} also failed import"
 
     # No stable tag found — try legacy ouroboros-stable branch
@@ -580,6 +707,9 @@ def safe_restart(
 
     t2 = import_test()
     if t2["ok"]:
-        return True, f"OK: fell back to {BRANCH_STABLE}"
+        validation2 = _run_runtime_validation(branch_name=BRANCH_STABLE, reason=f"{reason}_fallback_stable")
+        if validation2.get("ok"):
+            return True, f"OK: fell back to {BRANCH_STABLE}"
+        return False, f"{BRANCH_STABLE} failed validation: {validation2.get('failed_step') or 'unknown'}"
 
-    return False, "All fallbacks failed import (dev, stable tags, stable branch)"
+    return False, "All fallbacks failed import/validation (dev, stable tags, stable branch)"
