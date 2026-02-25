@@ -26,7 +26,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.update_budget_from_usage(usage)
 
     # Log to events.jsonl for audit trail
-    from ouroboros.utils import utc_now_iso, append_jsonl
+    from ouroboros.utils import append_jsonl, utc_now_iso
     try:
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
             "ts": evt.get("ts", utc_now_iso()),
@@ -86,10 +86,72 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _extract_task_result_preview(task_id: str, ctx: Any) -> str:
+    """Return a compact one-line result preview from task_results/<task_id>.json."""
+    if not task_id:
+        return ""
+    try:
+        result_file = ctx.DRIVE_ROOT / "task_results" / f"{task_id}.json"
+        if not result_file.exists():
+            return ""
+        payload = json.loads(result_file.read_text(encoding="utf-8"))
+        raw = str(payload.get("result") or "").strip()
+        if not raw:
+            return ""
+        return " ".join(raw.splitlines())[:300]
+    except Exception:
+        log.debug("Failed to extract task result preview for IMPROVE.md", exc_info=True)
+        return ""
+
+
+def _append_evolution_lesson(evt: Dict[str, Any], ctx: Any) -> None:
+    """Append a concise lesson to IMPROVE.md for a successful evolution cycle."""
+    task_id = str(evt.get("task_id") or "").strip()
+    if not task_id:
+        return
+
+    improve_path = ctx.REPO_DIR / "IMPROVE.md"
+    if not improve_path.exists():
+        improve_path.write_text(
+            "# How to Improve Effectively\n\n"
+            "This file captures lessons on self-improvement.\n"
+            "Maintained by the agent. See BIBLE.md section 8.\n",
+            encoding="utf-8",
+        )
+
+    marker = f"evolution-task:{task_id}"
+    try:
+        current = improve_path.read_text(encoding="utf-8")
+    except Exception:
+        current = ""
+    if marker in current:
+        return
+
+    ts_raw = str(evt.get("ts") or datetime.datetime.now(datetime.timezone.utc).isoformat())
+    ts_human = ts_raw.replace("T", " ")
+    cost = round(float(evt.get("cost_usd") or 0.0), 4)
+    rounds = int(evt.get("total_rounds") or 0)
+    preview = _extract_task_result_preview(task_id, ctx)
+    worked = f"Успешный цикл evolution: cost=${cost}, rounds={rounds}."
+    if preview:
+        worked += f" Итог: {preview}"
+
+    lesson = (
+        f"\n\n<!-- {marker} -->\n"
+        f"## {ts_human} Evolution lesson\n"
+        f"- Task: `{task_id}`\n"
+        f"- Сработало: {worked}\n"
+        "- Не сработало: В `task_done` не переданы явные сбои; сверяй с `logs/tools.jsonl` и `logs/events.jsonl`.\n"
+        "- Следующий шаг: закрепить успешный паттерн в коде/промпте и добавить тест при необходимости.\n"
+    )
+    improve_path.write_text(current + lesson, encoding="utf-8")
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     task_type = str(evt.get("task_type") or "")
     wid = evt.get("worker_id")
+    evolution_success = False
 
     # Track evolution task success/failure for circuit breaker
     if task_type == "evolution":
@@ -107,6 +169,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             # Success: reset failure counter
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)
+            evolution_success = True
         else:
             # Likely failure (empty response or minimal work)
             failures = int(st.get("evolution_consecutive_failures") or 0) + 1
@@ -150,6 +213,12 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             os.rename(tmp_file, result_file)
     except Exception as e:
         log.warning("Failed to store task result in events: %s", e)
+
+    if task_type == "evolution" and evolution_success:
+        try:
+            _append_evolution_lesson(evt, ctx)
+        except Exception:
+            log.warning("Failed to append evolution lesson to IMPROVE.md", exc_info=True)
 
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
@@ -299,7 +368,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     if depth > 3:
         log.warning("Rejected task due to depth limit: depth=%d, desc=%s", depth, desc[:100])
         if owner_chat_id:
-            ctx.send_with_budget(int(owner_chat_id), f"⚠️ Task rejected: subtask depth limit (3) exceeded")
+            ctx.send_with_budget(int(owner_chat_id), "⚠️ Task rejected: subtask depth limit (3) exceeded")
         return
 
     if owner_chat_id and desc:
