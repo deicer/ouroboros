@@ -352,7 +352,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "switch_model",
             "description": "Switch to a different LLM model or reasoning effort level. "
                            "Use when you need more power (complex code, deep reasoning) "
-                           "or want to save budget (simple tasks). Takes effect on next round.",
+                           "or want a faster/cheaper model (simple tasks). Takes effect on next round.",
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
                 "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
@@ -361,7 +361,7 @@ def get_tools() -> List[ToolEntry]:
         }, _switch_model),
         ToolEntry("reload_model_config", {
             "name": "reload_model_config",
-            "description": "Reload model settings from .env (paid/free priority lists, main model, auto-free switch). "
+            "description": "Reload model settings from .env (paid/free priority lists and main model). "
                            "Use after updating .env without restarting the bot.",
             "parameters": {"type": "object", "properties": {
                 "apply_now": {"type": "boolean", "default": True,

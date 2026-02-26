@@ -18,7 +18,6 @@ from ouroboros.memory import Memory
 from ouroboros.utils import (
     clip_text,
     estimate_tokens,
-    get_budget_remaining,
     get_git_info,
     read_text,
     utc_now_iso,
@@ -75,7 +74,7 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
 
 
 def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
-    """Build the runtime context section (utc_now, repo_dir, drive_root, git_head, git_branch, task info, budget info)."""
+    """Build runtime context (utc_now, repo_dir, drive_root, git_head, git_branch, task info)."""
     # --- Git context ---
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
@@ -83,19 +82,13 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         log.debug("Failed to get git info for context", exc_info=True)
         git_branch, git_sha = "unknown", "unknown"
 
-    # --- State + Budget calculation ---
-    budget_info = None
+    # --- State snapshot ---
     state_data = {}
     try:
         state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
         state_data = json.loads(state_json)
-        remaining_usd = get_budget_remaining(state_data)
-        or_limit = state_data.get("openrouter_limit")
-        total_usd = float(or_limit) if or_limit is not None else 0.0
-        spent_usd = (total_usd - remaining_usd) if remaining_usd is not None else float(state_data.get("spent_usd", 0))
-        budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
     except Exception:
-        log.debug("Failed to calculate budget info for context", exc_info=True)
+        log.debug("Failed to read state data for runtime context", exc_info=True)
         pass
 
     no_approve_mode = bool(state_data.get("no_approve_mode"))
@@ -110,8 +103,6 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         "task": {"id": task.get("id"), "type": task.get("type")},
         "no_approve_mode": no_approve_mode,
     }
-    if budget_info:
-        runtime_data["budget"] = budget_info
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     return "## Runtime context\n\n" + runtime_ctx
 
@@ -281,24 +272,7 @@ def _build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # 2. Budget remaining (OpenRouter ground truth)
-    try:
-        state_json = read_text(env.drive_path("state/state.json"))
-        state_data = json.loads(state_json)
-        remaining = get_budget_remaining(state_data)
-        if remaining is not None:
-            if remaining < 10:
-                checks.append(f"CRITICAL: LOW BUDGET — remaining=${remaining:.2f}")
-            elif remaining < 50:
-                checks.append(f"WARNING: LOW BUDGET — remaining=${remaining:.2f}")
-            else:
-                checks.append(f"OK: budget remaining=${remaining:.2f}")
-        else:
-            checks.append("OK: budget (not yet fetched)")
-    except Exception:
-        pass
-
-    # 3. Per-task cost anomalies
+    # 2. Per-task cost anomalies
     try:
         from supervisor.state import per_task_cost_summary
         costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
@@ -312,7 +286,7 @@ def _build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # 4. Stale identity.md
+    # 3. Stale identity.md
     try:
         import time as _time
         identity_path = env.drive_path("memory/identity.md")
@@ -325,7 +299,7 @@ def _build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
-    # 5. Duplicate processing detection: same owner message text appearing in multiple tasks
+    # 4. Duplicate processing detection: same owner message text appearing in multiple tasks
     try:
         import hashlib
         msg_hash_to_tasks: Dict[str, set] = {}

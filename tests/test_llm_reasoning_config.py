@@ -82,7 +82,7 @@ def test_get_paid_models_from_env_explicit_list(monkeypatch):
     ]
 
 
-def test_get_fallback_models_respects_paid_then_free_priority(monkeypatch):
+def test_get_fallback_models_respects_free_then_paid_priority(monkeypatch):
     monkeypatch.setenv(
         "OUROBOROS_MODEL_PAID_LIST",
         "x-ai/grok-4.1-fast,anthropic/claude-sonnet-4.6",
@@ -93,9 +93,9 @@ def test_get_fallback_models_respects_paid_then_free_priority(monkeypatch):
     )
     candidates = get_fallback_models_from_env(active_model="x-ai/grok-4.1-fast")
     assert candidates == [
-        "anthropic/claude-sonnet-4.6",
         "arcee-ai/trinity-large-preview:free",
         "z-ai/glm-4.5-air:free",
+        "anthropic/claude-sonnet-4.6",
     ]
 
 

@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl,
     truncate_for_log,
-    get_git_info, sanitize_task_for_event, get_budget_remaining, safe_resolve_under_root,
+    get_git_info, sanitize_task_for_event, safe_resolve_under_root,
 )
 from ouroboros.llm import LLMClient, add_usage
 from ouroboros.tools import ToolRegistry
@@ -374,57 +374,12 @@ class OuroborosAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}, 0
 
-    def _check_budget(self) -> Tuple[dict, int]:
-        """Check budget remaining with warning thresholds (OpenRouter SSOT)."""
-        try:
-            state_data = self._load_budget_state_fresh()
-
-            remaining = get_budget_remaining(state_data)
-            if remaining is None:
-                return {"status": "unconfigured"}, 0
-            or_limit = state_data.get("openrouter_limit")
-            total = float(or_limit) if or_limit is not None else remaining
-            spent = total - remaining
-
-            if remaining < 10:
-                status = "emergency"
-                issues = 1
-            elif remaining < 50:
-                status = "critical"
-                issues = 1
-            elif remaining < 100:
-                status = "warning"
-                issues = 0
-            else:
-                status = "ok"
-                issues = 0
-
-            return {
-                "status": status,
-                "remaining_usd": round(remaining, 2),
-                "total_usd": round(total, 2),
-                "spent_usd": round(spent, 2),
-            }, issues
-        except Exception as e:
-            return {"status": "error", "error": str(e)}, 0
-
-    def _load_budget_state_fresh(self) -> Dict[str, Any]:
-        """Load state and refresh stale OpenRouter budget snapshot when needed."""
-        try:
-            from supervisor.state import refresh_openrouter_budget_if_stale
-            return refresh_openrouter_budget_if_stale()
-        except Exception:
-            log.debug("Failed to refresh OpenRouter budget snapshot; using local state", exc_info=True)
-            state_path = self.env.drive_path("state") / "state.json"
-            return json.loads(read_text(state_path))
-
     def _verify_system_state(self, git_sha: str) -> None:
         """Bible Principle 1: verify system state on every startup.
 
         Checks:
         - Uncommitted changes (auto-rescue commit & push)
         - VERSION file sync with git tags
-        - Budget remaining (warning thresholds)
         """
         checks = {}
         issues = 0
@@ -436,10 +391,6 @@ class OuroborosAgent:
 
         # 2. VERSION vs git tag
         checks["version_sync"], issue_count = self._check_version_sync()
-        issues += issue_count
-
-        # 3. Budget check
-        checks["budget"], issue_count = self._check_budget()
         issues += issue_count
 
         # Log verification result
@@ -500,15 +451,6 @@ class OuroborosAgent:
                 log.warning("Failed to log context soft cap trim event", exc_info=True)
                 pass
 
-        # Read budget remaining for cost guard (OpenRouter limit_remaining is SSOT)
-        budget_remaining = None
-        try:
-            state_data = self._load_budget_state_fresh()
-            budget_remaining = get_budget_remaining(state_data)
-        except Exception:
-            pass
-
-        cap_info["budget_remaining"] = budget_remaining
         return ctx, messages, cap_info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -526,7 +468,6 @@ class OuroborosAgent:
         try:
             # --- Prepare task context ---
             ctx, messages, cap_info = self._prepare_task_context(task)
-            budget_remaining = cap_info.get("budget_remaining")
 
             # --- LLM loop (delegated to loop.py) ---
             usage: Dict[str, Any] = {}
@@ -549,7 +490,6 @@ class OuroborosAgent:
                     incoming_messages=self._incoming_messages,
                     task_type=task_type_str,
                     task_id=str(task.get("id") or ""),
-                    budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
                     initial_effort=initial_effort,
                     drive_root=self.env.drive_root,

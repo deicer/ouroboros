@@ -19,7 +19,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
-import os
 import pathlib
 import queue
 import threading
@@ -30,13 +29,11 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
-    get_budget_remaining,
 )
 from ouroboros.llm import (
     LLMClient,
     get_light_model_from_env,
     get_free_models_from_env,
-    is_free_model,
 )
 
 log = logging.getLogger(__name__)
@@ -70,11 +67,8 @@ class BackgroundConsciousness:
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
 
-        # Budget tracking
+        # Usage tracking
         self._bg_spent_usd: float = 0.0
-        self._bg_budget_pct: float = float(
-            os.environ.get("OUROBOROS_BG_BUDGET_PCT", "10")
-        )
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -86,32 +80,10 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        model = get_light_model_from_env()
-        if is_free_model(model):
-            return model
-
-        raw_enabled = str(os.environ.get("OUROBOROS_AUTO_FREE_SWITCH", "true")).strip().lower()
-        auto_enabled = raw_enabled in {"1", "true", "yes", "on"}
-        if not auto_enabled:
-            return model
-
-        try:
-            threshold = float(str(os.environ.get("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", "0.40")).strip())
-        except (TypeError, ValueError):
-            threshold = 0.40
-
-        try:
-            state_path = self._drive_root / "state" / "state.json"
-            state_data = json.loads(read_text(state_path))
-            remaining = get_budget_remaining(state_data)
-            if remaining is not None and remaining <= threshold:
-                free_candidates = get_free_models_from_env(active_model=model)
-                if free_candidates:
-                    return free_candidates[0]
-        except Exception:
-            log.debug("Failed to auto-switch BG model to free", exc_info=True)
-
-        return model
+        free_candidates = get_free_models_from_env()
+        if free_candidates:
+            return free_candidates[0]
+        return get_light_model_from_env()
 
     def start(self) -> str:
         if self.is_running:
@@ -132,7 +104,7 @@ class BackgroundConsciousness:
         return "Background consciousness stopping."
 
     def pause(self) -> None:
-        """Pause during task execution to avoid budget contention."""
+        """Pause during task execution to avoid contention."""
         self._paused = True
 
     def resume(self) -> None:
@@ -169,11 +141,6 @@ class BackgroundConsciousness:
             if self._paused:
                 continue
 
-            # Budget check
-            if not self._check_budget():
-                self._next_wakeup_sec = 3600  # Sleep long if over budget
-                continue
-
             try:
                 self._think()
             except Exception as e:
@@ -186,23 +153,6 @@ class BackgroundConsciousness:
                 self._next_wakeup_sec = min(
                     self._next_wakeup_sec * 2, 1800
                 )
-
-    def _check_budget(self) -> bool:
-        """Check if background consciousness is within its budget allocation."""
-        try:
-            from supervisor.state import load_state
-            st = load_state()
-            or_limit = st.get("openrouter_limit")
-            if or_limit is None:
-                return True  # no limit configured
-            total_budget = float(or_limit)
-            if total_budget <= 0:
-                return True
-            max_bg = total_budget * (self._bg_budget_pct / 100.0)
-            return self._bg_spent_usd < max_bg
-        except Exception:
-            log.warning("Failed to check background consciousness budget", exc_info=True)
-            return True
 
     def _append_thinking_trace(
         self,
@@ -282,15 +232,6 @@ class BackgroundConsciousness:
                     })
                 except Exception:
                     log.debug("Failed to update global budget from BG consciousness", exc_info=True)
-
-                # Budget check between rounds
-                if not self._check_budget():
-                    append_jsonl(self._drive_root / "logs" / "events.jsonl", {
-                        "ts": utc_now_iso(),
-                        "type": "bg_budget_exceeded_mid_cycle",
-                        "round": round_idx,
-                    })
-                    break
 
                 # Report usage to supervisor
                 if self._event_queue is not None:
@@ -449,20 +390,8 @@ class BackgroundConsciousness:
 
         # Runtime info + state
         runtime_lines = [f"UTC: {utc_now_iso()}"]
-        runtime_lines.append(f"BG budget spent: ${self._bg_spent_usd:.4f}")
+        runtime_lines.append(f"BG usage tracked: ${self._bg_spent_usd:.4f}")
         runtime_lines.append(f"Current wakeup interval: {self._next_wakeup_sec}s")
-
-        # Read state.json for budget remaining
-        try:
-            state_path = self._drive_root / "state" / "state.json"
-            if state_path.exists():
-                state_data = json.loads(read_text(state_path))
-                or_remaining = state_data.get("openrouter_limit_remaining")
-                or_limit = state_data.get("openrouter_limit")
-                if or_remaining is not None and or_limit is not None:
-                    runtime_lines.append(f"Budget remaining: ${float(or_remaining):.2f} / ${float(or_limit):.2f}")
-        except Exception as e:
-            log.debug("Failed to read state for budget info: %s", e)
 
         # Show current model
         runtime_lines.append(f"Current model: {self._model}")

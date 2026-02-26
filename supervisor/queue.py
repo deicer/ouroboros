@@ -17,12 +17,10 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
-    EVOLUTION_BUDGET_RESERVE,
     QUEUE_SNAPSHOT_PATH,
     append_jsonl,
     atomic_write_text,
     load_state,
-    openrouter_budget_remaining,
     save_state,
 )
 from supervisor.telegram import send_with_budget
@@ -399,7 +397,7 @@ def enqueue_evolution_task_if_needed() -> None:
     """Enqueue evolution task if queue is empty and evolution mode is enabled.
 
     Circuit breaker: pauses evolution after 3 consecutive failures to prevent
-    burning budget on infinite retry loops.
+    infinite retry loops.
     """
     if PENDING or RUNNING:
         return
@@ -428,19 +426,6 @@ def enqueue_evolution_task_if_needed() -> None:
         )
         return
 
-    remaining = openrouter_budget_remaining(st)
-    if remaining < EVOLUTION_BUDGET_RESERVE:
-        st["evolution_mode_enabled"] = False
-        save_state(st)
-        _append_evolution_log(
-            "evolution_budget_stop",
-            reason="budget_below_reserve",
-            remaining_budget=round(float(remaining), 4),
-            reserve_budget=round(float(EVOLUTION_BUDGET_RESERVE), 4),
-            action="pause_evolution",
-        )
-        send_with_budget(int(owner_chat_id), f"💸 Evolution stopped: ${remaining:.2f} remaining (reserve ${EVOLUTION_BUDGET_RESERVE:.0f} for conversations).")
-        return
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
     enqueue_task({
@@ -455,7 +440,6 @@ def enqueue_evolution_task_if_needed() -> None:
         "evolution_enqueued",
         task_id=tid,
         cycle=cycle,
-        remaining_budget=round(float(remaining), 4),
         consecutive_failures=consecutive_failures,
     )
     send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid}")

@@ -25,6 +25,7 @@ from ouroboros.llm import (
     add_usage,
     get_fallback_models_from_env,
     get_free_models_from_env,
+    get_paid_models_from_env,
     is_free_model,
     normalize_reasoning_effort,
 )
@@ -181,19 +182,58 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _pick_auto_free_model(active_model: str, budget_remaining_usd: Optional[float]) -> Optional[str]:
-    """Pick a free fallback model when budget is low enough."""
-    if not _env_bool("OUROBOROS_AUTO_FREE_SWITCH", default=True):
-        return None
-    if budget_remaining_usd is None:
-        return None
-    threshold = _env_float("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", 0.40)
-    if budget_remaining_usd > threshold:
-        return None
-    if is_free_model(active_model):
-        return None
-    free_candidates = get_free_models_from_env(active_model=active_model)
-    return free_candidates[0] if free_candidates else None
+def _is_complex_task_type(task_type: str) -> bool:
+    return str(task_type or "").strip().lower() in {
+        "review",
+        "evolution",
+        "arch_review",
+        "summarize",
+    }
+
+
+def _pick_initial_model(default_model: str, task_type: str) -> str:
+    """
+    Pick initial model:
+    - complex tasks: first paid candidate (if configured),
+    - all other tasks: first free candidate (if configured),
+    - fallback: default model.
+    """
+    paid_candidates = get_paid_models_from_env(active_model="")
+    free_candidates = get_free_models_from_env(active_model="")
+
+    if _is_complex_task_type(task_type) and paid_candidates:
+        return paid_candidates[0]
+    if free_candidates:
+        return free_candidates[0]
+    if paid_candidates:
+        return paid_candidates[0]
+    return default_model
+
+
+def _next_paid_candidate(active_model: str, cooldown_until: Dict[str, float]) -> Optional[str]:
+    now = time.monotonic()
+    for model in get_paid_models_from_env(active_model=active_model):
+        if cooldown_until.get(model, 0.0) > now:
+            continue
+        return model
+    return None
+
+
+def _is_paid_limit_error(error: Exception) -> bool:
+    text = str(error or "").lower()
+    markers = (
+        "insufficient",
+        "insufficient credit",
+        "not enough credit",
+        "payment required",
+        "billing",
+        "quota",
+        "limit reached",
+        "credit balance",
+        "out of credits",
+        "402",
+    )
+    return any(m in text for m in markers)
 
 
 _DEFAULT_MODEL_CONTEXT_WINDOW = 200_000
@@ -621,43 +661,11 @@ def _check_budget_limits(
     task_type: str = "task",
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """
-    Check budget limits and handle budget overrun.
+    Legacy compatibility shim (budget guard removed).
 
     Returns:
-        None if budget is OK (continue loop)
-        (final_text, accumulated_usage, llm_trace) if budget exceeded (stop loop)
+        Always None. Budget no longer controls loop termination/model routing.
     """
-    # If remaining budget is unknown or non-positive, do not hard-stop the loop.
-    # This keeps the bot operational even when external budget telemetry reports 0.
-    if budget_remaining_usd is None or budget_remaining_usd <= 0:
-        return None
-    # Budget guard applies only to paid models by default.
-    # On free models the agent should keep working.
-    if is_free_model(active_model) and not _env_bool("OUROBOROS_BUDGET_GUARD_ON_FREE", default=False):
-        return None
-
-    task_cost = accumulated_usage.get("cost", 0)
-    budget_pct = task_cost / budget_remaining_usd
-
-    if budget_pct > 0.5:
-        # Hard stop — protect the budget
-        finish_reason = f"Task spent ${task_cost:.3f} (>50% of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
-        messages.append({"role": "system", "content": f"[BUDGET LIMIT] {finish_reason} Give your final response now."})
-        try:
-            final_msg, final_cost = _call_llm_with_retry(
-                llm, messages, active_model, None, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
-            )
-            if final_msg:
-                return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-            return finish_reason, accumulated_usage, llm_trace
-        except Exception:
-            log.warning("Failed to get final response after budget limit", exc_info=True)
-            return finish_reason, accumulated_usage, llm_trace
-    elif budget_pct > 0.3 and round_idx % 10 == 0:
-        # Soft nudge every 10 rounds when spending is significant
-        messages.append({"role": "system", "content": f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible."})
-
     return None
 
 
@@ -917,19 +925,24 @@ def run_llm_loop(
     LLM controls model/effort via switch_model tool (LLM-first, Bible P3).
 
     Args:
-        budget_remaining_usd: If set, forces completion when task cost exceeds 50% of this budget
         initial_effort: Initial reasoning effort level (default "medium")
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """
-    # LLM-first: single default model, LLM switches via tool if needed
-    active_model = llm.default_model()
+    # Budget-driven stopping is deprecated; keep param for backward compatibility.
+    _ = budget_remaining_usd
+
+    # Model router:
+    # - default to free list for normal tasks,
+    # - start with paid list for explicitly complex tasks.
+    active_model = _pick_initial_model(llm.default_model(), task_type)
     active_effort = initial_effort
 
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
-    auto_free_switch_announced = False
+    paid_cooldown_sec = max(120, _env_int("OUROBOROS_PAID_MODEL_COOLDOWN_SEC", 1800))
+    paid_model_cooldown_until: Dict[str, float] = {}
     # Wire module-level registry ref so tool_discovery handlers work outside run_llm_loop too
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
@@ -951,6 +964,63 @@ def run_llm_loop(
     free_guard_recovery_limit = _loop_guard_free_recovery_limit()
     free_error_recoveries = 0
     free_batch_recoveries = 0
+
+    def _try_escalate_to_paid(reason: str, round_no: int) -> bool:
+        nonlocal active_model, active_effort, free_error_recoveries, free_batch_recoveries
+        if not is_free_model(active_model):
+            return False
+        target = _next_paid_candidate(active_model, paid_model_cooldown_until)
+        if not target:
+            return False
+        prev_model = active_model
+        active_model = target
+        # Paid escalation is for "hard mode": increase reasoning effort conservatively.
+        active_effort = normalize_reasoning_effort("high", default=active_effort)
+        free_error_recoveries = 0
+        free_batch_recoveries = 0
+        recent_error_sigs.clear()
+        recent_batch_sigs.clear()
+        emit_progress(f"🚀 Эскалация на платную модель: {prev_model} → {target} ({reason})")
+        _append_thinking_trace(
+            drive_logs,
+            source="task_loop",
+            step="escalate_to_paid_model",
+            task_id=task_id,
+            task_type=task_type or "task",
+            round_idx=round_no,
+            details={"from": prev_model, "to": target, "reason": reason},
+        )
+        append_jsonl(drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "model_escalation",
+            "task_id": task_id,
+            "task_type": task_type or "task",
+            "reason": reason,
+            "from_model": prev_model,
+            "to_model": target,
+            "round": int(round_no),
+        })
+        return True
+
+    def _on_llm_api_error(error_model: str, error: Exception) -> bool:
+        model_name = str(error_model or "").strip()
+        if not model_name or is_free_model(model_name):
+            return False
+        if not _is_paid_limit_error(error):
+            return False
+        cooldown_until = time.monotonic() + float(paid_cooldown_sec)
+        prev = float(paid_model_cooldown_until.get(model_name, 0.0))
+        if cooldown_until > prev:
+            paid_model_cooldown_until[model_name] = cooldown_until
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "paid_model_cooldown",
+                "task_id": task_id,
+                "model": model_name,
+                "cooldown_sec": int(paid_cooldown_sec),
+                "reason": truncate_for_log(str(error), 240),
+            })
+        return True
     try:
         repeated_error_threshold = max(2, int(os.environ.get("OUROBOROS_REPEAT_ERROR_THRESHOLD", "4")))
     except (ValueError, TypeError):
@@ -1009,9 +1079,10 @@ def run_llm_loop(
                 )
                 messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
                 try:
-                    final_msg, final_cost = _call_llm_with_retry(
+                    final_msg, _ = _call_llm_with_retry(
                         llm, messages, active_model, None, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                        on_api_error=_on_llm_api_error,
                     )
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -1052,31 +1123,6 @@ def run_llm_loop(
                     details={"from": prev_effort, "to": active_effort},
                 )
 
-            # Automatic paid -> free model switch on low budget.
-            auto_free_model = _pick_auto_free_model(active_model, budget_remaining_usd)
-            if auto_free_model:
-                prev_model = active_model
-                active_model = auto_free_model
-                _append_thinking_trace(
-                    drive_logs,
-                    source="task_loop",
-                    step="auto_free_model_switch",
-                    task_id=task_id,
-                    task_type=task_type or "task",
-                    round_idx=round_idx,
-                    details={
-                        "from": prev_model,
-                        "to": active_model,
-                        "remaining_budget_usd": budget_remaining_usd,
-                    },
-                )
-                if not auto_free_switch_announced:
-                    emit_progress(
-                        f"💸 Budget auto-switch: {prev_model} → {active_model} "
-                        f"(remaining ${float(budget_remaining_usd):.2f})"
-                    )
-                    auto_free_switch_announced = True
-
             # Inject owner messages (in-process queue + Drive mailbox)
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
@@ -1094,17 +1140,25 @@ def run_llm_loop(
                     messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
-            msg, cost = _call_llm_with_retry(
+            msg, _ = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                on_api_error=_on_llm_api_error,
             )
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
                 # Only allow fallback to models explicitly configured via env.
-                fallback_candidates = get_fallback_models_from_env(active_model=active_model)
+                now_mono = time.monotonic()
+                fallback_candidates = []
+                for candidate in get_fallback_models_from_env(active_model=active_model):
+                    if (not is_free_model(candidate)) and paid_model_cooldown_until.get(candidate, 0.0) > now_mono:
+                        continue
+                    fallback_candidates.append(candidate)
                 fallback_model = fallback_candidates[0] if fallback_candidates else None
                 if fallback_model is None:
+                    if _try_escalate_to_paid("free_model_failed_to_respond", round_idx):
+                        continue
                     _append_thinking_trace(
                         drive_logs,
                         source="task_loop",
@@ -1133,9 +1187,10 @@ def run_llm_loop(
                 )
 
                 # Try fallback model (don't increment round_idx — this is still same logical round)
-                msg, fallback_cost = _call_llm_with_retry(
+                msg, _ = _call_llm_with_retry(
                     llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
+                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                    on_api_error=_on_llm_api_error,
                 )
 
                 # If fallback also fails, give up
@@ -1277,6 +1332,8 @@ def run_llm_loop(
                                 "recovery_no": int(free_error_recoveries),
                             })
                             continue
+                        if (not hard_stop) and _try_escalate_to_paid("repeated_tool_errors", round_idx):
+                            continue
                         final = (
                             f"⚠️ Обнаружены повторяющиеся ошибки инструментов ({top_count} повторов за "
                             f"{len(recent_error_sigs)} раундов). "
@@ -1359,6 +1416,8 @@ def run_llm_loop(
                             "recovery_no": int(free_batch_recoveries),
                         })
                         continue
+                    if (not hard_stop) and _try_escalate_to_paid("repeated_tool_batch", round_idx):
+                        continue
                     final = (
                         f"⚠️ Обнаружен цикл одинаковых действий ({top_count} повторов за "
                         f"{len(recent_batch_sigs)} раундов). "
@@ -1389,25 +1448,6 @@ def run_llm_loop(
                         "window_size": int(len(recent_batch_sigs)),
                     })
                     return final, accumulated_usage, llm_trace
-
-            # --- Budget guard ---
-            # LLM decides when to stop (Bible P0, P3). We only enforce hard budget limit.
-            budget_result = _check_budget_limits(
-                budget_remaining_usd, accumulated_usage, round_idx, messages,
-                llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, event_queue, llm_trace, task_type
-            )
-            if budget_result is not None:
-                _append_thinking_trace(
-                    drive_logs,
-                    source="task_loop",
-                    step="budget_guard_stop",
-                    task_id=task_id,
-                    task_type=task_type or "task",
-                    round_idx=round_idx,
-                    details={"remaining_budget_usd": budget_remaining_usd},
-                )
-                return budget_result
 
     finally:
         # Cleanup thread-sticky executor for stateful tools
@@ -1478,6 +1518,7 @@ def _call_llm_with_retry(
     event_queue: Optional[queue.Queue],
     accumulated_usage: Dict[str, Any],
     task_type: str = "",
+    on_api_error: Optional[Callable[[str, Exception], bool]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Call LLM with retry logic, usage tracking, and event emission.
@@ -1553,12 +1594,20 @@ def _call_llm_with_retry(
             return msg, cost
 
         except Exception as e:
+            stop_retries = False
+            if on_api_error is not None:
+                try:
+                    stop_retries = bool(on_api_error(model, e))
+                except Exception:
+                    log.debug("on_api_error callback failed", exc_info=True)
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_api_error",
                 "task_id": task_id,
                 "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
             })
+            if stop_retries:
+                return None, 0.0
             if attempt < max_retries - 1:
                 time.sleep(min(2 ** attempt * 2, 30))
 

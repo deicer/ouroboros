@@ -32,7 +32,6 @@ def test_enqueue_evolution_logs_enqueued(monkeypatch, tmp_path: pathlib.Path):
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "load_state", lambda: dict(state))
     monkeypatch.setattr(queue, "save_state", lambda st: saved.update(st))
-    monkeypatch.setattr(queue, "openrouter_budget_remaining", lambda st: 999.0)
     monkeypatch.setattr(queue, "send_with_budget", lambda *args, **kwargs: None)
     monkeypatch.setattr(queue, "enqueue_task", lambda task, front=False: enqueued.append(dict(task)) or task)
     monkeypatch.setattr(queue, "append_jsonl", lambda p, o: logs.append((p, dict(o))))
@@ -61,7 +60,6 @@ def test_enqueue_evolution_logs_breaker_open(monkeypatch, tmp_path: pathlib.Path
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "load_state", lambda: dict(state))
     monkeypatch.setattr(queue, "save_state", lambda st: saved.update(st))
-    monkeypatch.setattr(queue, "openrouter_budget_remaining", lambda st: 999.0)
     monkeypatch.setattr(queue, "send_with_budget", lambda *args, **kwargs: None)
     monkeypatch.setattr(queue, "append_jsonl", lambda p, o: logs.append((p, dict(o))))
 
@@ -74,7 +72,7 @@ def test_enqueue_evolution_logs_breaker_open(monkeypatch, tmp_path: pathlib.Path
     assert breaker[0]["consecutive_failures"] == 3
 
 
-def test_enqueue_evolution_logs_budget_stop(monkeypatch, tmp_path: pathlib.Path):
+def test_enqueue_evolution_does_not_stop_on_low_budget(monkeypatch, tmp_path: pathlib.Path):
     state = {
         "evolution_mode_enabled": True,
         "owner_chat_id": 101,
@@ -89,17 +87,19 @@ def test_enqueue_evolution_logs_budget_stop(monkeypatch, tmp_path: pathlib.Path)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "load_state", lambda: dict(state))
     monkeypatch.setattr(queue, "save_state", lambda st: saved.update(st))
-    monkeypatch.setattr(queue, "openrouter_budget_remaining", lambda st: 10.0)
     monkeypatch.setattr(queue, "send_with_budget", lambda *args, **kwargs: None)
+    enqueued: list[dict] = []
+    monkeypatch.setattr(queue, "enqueue_task", lambda task, front=False: enqueued.append(dict(task)) or task)
     monkeypatch.setattr(queue, "append_jsonl", lambda p, o: logs.append((p, dict(o))))
 
     queue.enqueue_evolution_task_if_needed()
 
-    assert saved["evolution_mode_enabled"] is False
+    assert len(enqueued) == 1
+    assert enqueued[0]["type"] == "evolution"
+    assert saved["evolution_mode_enabled"] is True
     evolution_logs = [obj for path, obj in logs if path.name == "evolution_log.jsonl"]
     stop = [obj for obj in evolution_logs if obj.get("type") == "evolution_budget_stop"]
-    assert len(stop) == 1
-    assert stop[0]["remaining_budget"] == 10.0
+    assert stop == []
 
 
 class _DummyCtx:

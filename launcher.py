@@ -77,8 +77,6 @@ MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="")
 MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default="")
 MODEL_PAID_LIST = get_cfg("OUROBOROS_MODEL_PAID_LIST", default="")
 MODEL_FREE_LIST = get_cfg("OUROBOROS_MODEL_FREE_LIST", default="")
-AUTO_FREE_SWITCH = get_cfg("OUROBOROS_AUTO_FREE_SWITCH", default="")
-AUTO_FREE_SWITCH_AT_USD = get_cfg("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", default="")
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600") or "600"))
@@ -127,14 +125,6 @@ if MODEL_FREE_LIST:
     os.environ["OUROBOROS_MODEL_FREE_LIST"] = str(MODEL_FREE_LIST)
 else:
     os.environ.pop("OUROBOROS_MODEL_FREE_LIST", None)
-if AUTO_FREE_SWITCH:
-    os.environ["OUROBOROS_AUTO_FREE_SWITCH"] = str(AUTO_FREE_SWITCH)
-else:
-    os.environ.pop("OUROBOROS_AUTO_FREE_SWITCH", None)
-if AUTO_FREE_SWITCH_AT_USD:
-    os.environ["OUROBOROS_AUTO_FREE_SWITCH_AT_USD"] = str(AUTO_FREE_SWITCH_AT_USD)
-else:
-    os.environ.pop("OUROBOROS_AUTO_FREE_SWITCH_AT_USD", None)
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
@@ -306,7 +296,6 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "max_workers": MAX_WORKERS,
     "model_default": MODEL_MAIN, "model_code": MODEL_CODE, "model_light": MODEL_LIGHT,
     "model_paid_list": MODEL_PAID_LIST, "model_free_list": MODEL_FREE_LIST,
-    "auto_free_switch": AUTO_FREE_SWITCH, "auto_free_switch_at_usd": AUTO_FREE_SWITCH_AT_USD,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
     "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,

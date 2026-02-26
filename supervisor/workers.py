@@ -554,23 +554,10 @@ def respawn_worker(wid: int) -> None:
 
 def assign_tasks() -> None:
     from supervisor import queue
-    from supervisor.state import openrouter_budget_remaining, EVOLUTION_BUDGET_RESERVE
     with _queue_lock:
         for w in WORKERS.values():
             if w.busy_task_id is None and PENDING:
-                # Find first suitable task (skip over-budget evolution tasks)
-                chosen_idx = None
-                for i, candidate in enumerate(PENDING):
-                    if str(candidate.get("type") or "") == "evolution" and openrouter_budget_remaining(load_state()) < EVOLUTION_BUDGET_RESERVE:
-                        continue
-                    chosen_idx = i
-                    break
-                if chosen_idx is None:
-                    # Only over-budget evolution tasks remain — clean them out
-                    PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
-                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
-                    continue
-                task = PENDING.pop(chosen_idx)
+                task = PENDING.pop(0)
                 w.busy_task_id = task["id"]
                 w.in_q.put(task)
                 now_ts = time.time()

@@ -23,8 +23,6 @@ _MODEL_ENV_KEYS = [
     "OUROBOROS_MODEL_FALLBACK_LIST",
     "OUROBOROS_MODEL_PAID_LIST",
     "OUROBOROS_MODEL_FREE_LIST",
-    "OUROBOROS_AUTO_FREE_SWITCH",
-    "OUROBOROS_AUTO_FREE_SWITCH_AT_USD",
     "OUROBOROS_REASONING_ENABLED",
     "OUROBOROS_WEBSEARCH_MODEL",
 ]
@@ -198,7 +196,10 @@ def get_fallback_models_from_env(active_model: str = "") -> List[str]:
     active = str(active_model or "").strip()
     paid_models = get_paid_models_from_env(active_model=active)
     free_models = get_free_models_from_env(active_model=active)
-    candidates = _ordered_unique([*paid_models, *free_models])
+    # Free-first fallback by default; escalate to paid only when needed.
+    prefer_paid = _env_bool("OUROBOROS_FALLBACK_PREFER_PAID", default=False)
+    ordered = [*paid_models, *free_models] if prefer_paid else [*free_models, *paid_models]
+    candidates = _ordered_unique(ordered)
     return [m for m in candidates if m and m != active]
 
 

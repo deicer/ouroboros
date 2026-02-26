@@ -469,6 +469,9 @@ def _format_budget_line(st: Dict[str, Any]) -> str:
 
 
 def budget_line(force: bool = False) -> str:
+    footer_enabled = str(os.environ.get("OUROBOROS_TELEGRAM_BUDGET_FOOTER", "false")).strip().lower()
+    if footer_enabled not in {"1", "true", "yes", "on"}:
+        return ""
     try:
         st = load_state()
         every = max(1, int(BUDGET_REPORT_EVERY_MESSAGES))
