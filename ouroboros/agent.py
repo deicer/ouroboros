@@ -508,6 +508,17 @@ class OuroborosAgent:
             if not isinstance(text, str) or not text.strip():
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."
 
+            # Refresh durable file map after tool activity so new files are discoverable
+            # across cycles/restarts without path guessing.
+            try:
+                if llm_trace.get("tool_calls"):
+                    self.memory.refresh_path_catalog(
+                        reason=f"task_done:{task.get('id')}",
+                        max_files=20000,
+                    )
+            except Exception:
+                log.debug("Failed to refresh path catalog at task end", exc_info=True)
+
             # Emit events for supervisor
             self._emit_task_results(task, text, usage, llm_trace, start_time, drive_logs)
             return list(self._pending_events)

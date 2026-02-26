@@ -10,10 +10,19 @@ import pathlib
 import uuid
 from typing import Any, Dict, List, Tuple
 
+from ouroboros.memory import Memory
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import read_text, safe_relpath, utc_now_iso
 
 log = logging.getLogger(__name__)
+
+_REPO_TO_DRIVE_ALIAS = {
+    "identity.md": "memory/identity.md",
+    "scratchpad": "memory/scratchpad.md",
+    "scratchpad.md": "memory/scratchpad.md",
+    "user_context.md": "memory/USER_CONTEXT.md",
+    "USER_CONTEXT.md": "memory/USER_CONTEXT.md",
+}
 
 
 def _resolve_read_path(root: pathlib.Path, raw_path: str) -> pathlib.Path:
@@ -115,10 +124,18 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
 
 
 def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
-    try:
-        file_path = _resolve_read_path(ctx.repo_dir, path)
-    except Exception as e:
-        return f"⚠️ PATH_ERROR: {e}"
+    raw_key = str(path or "").strip().replace("\\", "/")
+    mapped_drive_key = _REPO_TO_DRIVE_ALIAS.get(raw_key) or _REPO_TO_DRIVE_ALIAS.get(raw_key.lower())
+    if mapped_drive_key:
+        return _drive_read(ctx, mapped_drive_key, limit=limit)
+
+    mem = Memory(drive_root=ctx.drive_root, repo_dir=ctx.repo_dir)
+    file_path = mem.resolve_known_path("repo", path)
+    if file_path is None:
+        try:
+            file_path = _resolve_read_path(ctx.repo_dir, path)
+        except Exception as e:
+            return f"⚠️ PATH_ERROR: {e}"
 
     if file_path.is_dir():
         rel = file_path.relative_to(ctx.repo_dir) if file_path != ctx.repo_dir else pathlib.Path(".")
@@ -135,10 +152,13 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
 
 
 def _drive_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
-    try:
-        file_path = _resolve_read_path(ctx.drive_root, path)
-    except Exception as e:
-        return f"⚠️ PATH_ERROR: {e}"
+    mem = Memory(drive_root=ctx.drive_root, repo_dir=ctx.repo_dir)
+    file_path = mem.resolve_known_path("drive", path)
+    if file_path is None:
+        try:
+            file_path = _resolve_read_path(ctx.drive_root, path)
+        except Exception as e:
+            return f"⚠️ PATH_ERROR: {e}"
 
     if file_path.is_dir():
         rel = file_path.relative_to(ctx.drive_root) if file_path != ctx.drive_root else pathlib.Path(".")
@@ -163,6 +183,11 @@ def _drive_write(ctx: ToolContext, path: str, content: str, mode: str = "overwri
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
+    try:
+        rel = p.resolve().relative_to(ctx.drive_root.resolve()).as_posix()
+        Memory(drive_root=ctx.drive_root, repo_dir=ctx.repo_dir).register_path_in_catalog("drive", rel)
+    except Exception:
+        log.debug("Failed to register drive path in catalog after write", exc_info=True)
     return f"OK: wrote {mode} {path} ({len(content)} chars)"
 
 

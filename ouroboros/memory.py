@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import pathlib
+from datetime import datetime, timezone
+from urllib.parse import unquote
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -64,6 +66,9 @@ class Memory:
     def chat_archive_path(self) -> pathlib.Path:
         return self.logs_path("chat.archive.jsonl")
 
+    def path_catalog_path(self) -> pathlib.Path:
+        return self._memory_path("path_catalog.json")
+
     # --- Load / save ---
 
     def load_scratchpad(self) -> str:
@@ -113,6 +118,231 @@ class Memory:
             write_text(self.identity_journal_path(), "")
         if not self.user_context_journal_path().exists():
             write_text(self.user_context_journal_path(), "")
+        # Keep a durable path map so the agent can resolve files predictably.
+        self.ensure_path_catalog(max_age_sec=300, reason="ensure_files")
+
+    # --- Path catalog ---
+
+    _PATH_CATALOG_VERSION = 1
+    _REPO_SKIP_DIRS = frozenset({
+        ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        "node_modules", ".venv", "venv", "dist", "build",
+    })
+    _DRIVE_SKIP_DIRS = frozenset({
+        "__pycache__", "downloads", "screenshots", "archive", "locks",
+    })
+
+    def _default_path_aliases(self) -> Dict[str, Dict[str, str]]:
+        return {
+            "drive": {
+                "identity.md": "memory/identity.md",
+                "scratchpad": "memory/scratchpad.md",
+                "scratchpad.md": "memory/scratchpad.md",
+                "user_context.md": "memory/USER_CONTEXT.md",
+                "USER_CONTEXT.md": "memory/USER_CONTEXT.md",
+                "progress.jsonl": "logs/progress.jsonl",
+                "events.jsonl": "logs/events.jsonl",
+                "tools.jsonl": "logs/tools.jsonl",
+                "state.json": "state/state.json",
+            },
+            "repo": {
+                "agent.py": "ouroboros/agent.py",
+                "loop.py": "ouroboros/loop.py",
+                "llm.py": "ouroboros/llm.py",
+                "memory.py": "ouroboros/memory.py",
+                "registry.py": "ouroboros/tools/registry.py",
+            },
+        }
+
+    def _walk_rel_files(self, root: pathlib.Path, skip_dirs: frozenset[str], max_files: int) -> List[str]:
+        if not root.exists():
+            return []
+        out: List[str] = []
+        root_resolved = root.resolve()
+        for dirpath, dirnames, filenames in os.walk(root_resolved):
+            # Prune expensive/irrelevant directories.
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+            rel_dir = pathlib.Path(dirpath).resolve().relative_to(root_resolved)
+            for fname in filenames:
+                rel_path = (rel_dir / fname) if str(rel_dir) != "." else pathlib.Path(fname)
+                out.append(rel_path.as_posix())
+                if len(out) >= max_files:
+                    return sorted(out)
+        return sorted(out)
+
+    def load_path_catalog(self) -> Dict[str, Any]:
+        path = self.path_catalog_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(read_text(path))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            log.debug("Failed to load path catalog", exc_info=True)
+            return {}
+
+    def refresh_path_catalog(self, reason: str = "manual", max_files: int = 20000) -> Dict[str, Any]:
+        """Rebuild persistent file catalog for repo + drive roots."""
+        max_files = max(100, int(max_files or 20000))
+        repo_files: List[str] = []
+        if self.repo_dir is not None:
+            repo_files = self._walk_rel_files(self.repo_dir, self._REPO_SKIP_DIRS, max_files=max_files)
+        drive_files = self._walk_rel_files(self.drive_root, self._DRIVE_SKIP_DIRS, max_files=max_files)
+
+        aliases = self._default_path_aliases()
+        payload: Dict[str, Any] = {
+            "version": self._PATH_CATALOG_VERSION,
+            "updated_at": utc_now_iso(),
+            "reason": str(reason or "manual"),
+            "repo_root": str(self.repo_dir) if self.repo_dir is not None else "",
+            "drive_root": str(self.drive_root),
+            "repo_files": repo_files,
+            "drive_files": drive_files,
+            "repo_files_count": len(repo_files),
+            "drive_files_count": len(drive_files),
+            "aliases": aliases,
+        }
+
+        write_text(self.path_catalog_path(), json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
+
+    def _is_catalog_stale(self, updated_at: str, max_age_sec: int) -> bool:
+        if max_age_sec <= 0:
+            return True
+        if not updated_at:
+            return True
+        try:
+            dt = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            return age > float(max_age_sec)
+        except Exception:
+            return True
+
+    def ensure_path_catalog(self, max_age_sec: int = 300, reason: str = "auto", force: bool = False) -> Dict[str, Any]:
+        existing = self.load_path_catalog()
+        if not force and existing and not self._is_catalog_stale(str(existing.get("updated_at") or ""), max_age_sec=max_age_sec):
+            return existing
+        return self.refresh_path_catalog(reason=reason)
+
+    def _normalize_raw_path(self, scope: str, raw_path: str) -> str:
+        p = unquote(str(raw_path or "").strip()).replace("\\", "/").replace("\x00", "")
+        if scope == "drive":
+            if p.startswith("drive_root/"):
+                p = p[len("drive_root/"):]
+            if p.startswith("/data/"):
+                p = p[len("/data/"):]
+        else:
+            if p.startswith("repo_root/"):
+                p = p[len("repo_root/"):]
+            if p.startswith("/app/"):
+                p = p[len("/app/"):]
+        return p
+
+    def _resolve_from_catalog_entry(self, root: pathlib.Path, rel: str) -> Optional[pathlib.Path]:
+        try:
+            candidate = (root.resolve() / pathlib.Path(rel)).resolve()
+            if candidate == root.resolve() or root.resolve() in candidate.parents:
+                return candidate
+        except Exception:
+            log.debug("Failed to resolve candidate from catalog entry", exc_info=True)
+        return None
+
+    def resolve_known_path(self, scope: str, raw_path: str) -> Optional[pathlib.Path]:
+        """
+        Resolve path using normalized aliases + durable catalog.
+        Returns None when catalog cannot confidently resolve path.
+        """
+        scope = str(scope or "").strip().lower()
+        if scope not in {"repo", "drive"}:
+            return None
+        if scope == "repo" and self.repo_dir is None:
+            return None
+
+        root = self.repo_dir if scope == "repo" else self.drive_root
+        assert root is not None
+
+        p = self._normalize_raw_path(scope, raw_path)
+        if not p:
+            return None
+
+        # Absolute path inside root.
+        try:
+            abs_candidate = pathlib.Path(p)
+            if abs_candidate.is_absolute():
+                resolved_abs = abs_candidate.resolve()
+                root_resolved = root.resolve()
+                if resolved_abs == root_resolved or root_resolved in resolved_abs.parents:
+                    return resolved_abs
+        except Exception:
+            log.debug("Absolute path normalization failed", exc_info=True)
+
+        catalog = self.ensure_path_catalog(max_age_sec=600, reason="resolve_known_path")
+        aliases = ((catalog.get("aliases") or {}).get(scope) or {})
+        if p in aliases:
+            resolved = self._resolve_from_catalog_entry(root, aliases[p])
+            if resolved is not None:
+                return resolved
+        # Case-insensitive alias fallback.
+        low = p.lower()
+        for alias, mapped in aliases.items():
+            if str(alias).lower() == low:
+                resolved = self._resolve_from_catalog_entry(root, str(mapped))
+                if resolved is not None:
+                    return resolved
+
+        # Direct relative path.
+        direct = self._resolve_from_catalog_entry(root, p)
+        if direct is not None and direct.exists():
+            return direct
+
+        # Name-only fallback from index when unique.
+        entries = catalog.get(f"{scope}_files") or []
+        base_name = pathlib.PurePosixPath(p).name
+        if base_name:
+            matches = [str(rel) for rel in entries if pathlib.PurePosixPath(str(rel)).name == base_name]
+            matches = sorted(set(matches))
+            if len(matches) == 1:
+                resolved = self._resolve_from_catalog_entry(root, matches[0])
+                if resolved is not None and resolved.exists():
+                    return resolved
+
+        # Last chance: refresh once and retry basename unique-match.
+        fresh = self.ensure_path_catalog(max_age_sec=0, reason="resolve_retry_refresh", force=True)
+        fresh_entries = fresh.get(f"{scope}_files") or []
+        if base_name:
+            matches = [str(rel) for rel in fresh_entries if pathlib.PurePosixPath(str(rel)).name == base_name]
+            matches = sorted(set(matches))
+            if len(matches) == 1:
+                resolved = self._resolve_from_catalog_entry(root, matches[0])
+                if resolved is not None and resolved.exists():
+                    return resolved
+        return None
+
+    def register_path_in_catalog(self, scope: str, rel_path: str) -> None:
+        """
+        Fast incremental update for newly written file paths.
+        """
+        scope = str(scope or "").strip().lower()
+        if scope not in {"repo", "drive"}:
+            return
+        rel_norm = str(pathlib.PurePosixPath(str(rel_path or "").replace("\\", "/").lstrip("/")))
+        if not rel_norm or rel_norm == ".":
+            return
+
+        catalog = self.ensure_path_catalog(max_age_sec=3600, reason="register_path_in_catalog")
+        key = f"{scope}_files"
+        items = [str(x) for x in (catalog.get(key) or [])]
+        if rel_norm in items:
+            return
+        items.append(rel_norm)
+        items = sorted(set(items))
+        catalog[key] = items
+        catalog[f"{scope}_files_count"] = len(items)
+        catalog["updated_at"] = utc_now_iso()
+        catalog["reason"] = "register_path_in_catalog"
+        write_text(self.path_catalog_path(), json.dumps(catalog, ensure_ascii=False, indent=2))
 
     def _resolve_user_context_path(self, migrate: bool = True) -> pathlib.Path:
         """Resolve USER_CONTEXT path and optionally migrate lowercase alias."""

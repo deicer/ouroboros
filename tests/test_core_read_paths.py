@@ -107,3 +107,45 @@ def test_drive_write_absolute_data_path_writes_under_drive_root():
         assert target.exists()
         assert target.read_text(encoding="utf-8") == "[]"
         assert not (drive / "data" / "memory" / "goals.json").exists()
+
+
+def test_drive_read_alias_identity_maps_to_memory():
+    with tempfile.TemporaryDirectory() as td:
+        repo = pathlib.Path(td) / "repo"
+        drive = pathlib.Path(td) / "data"
+        repo.mkdir(parents=True, exist_ok=True)
+        (drive / "memory").mkdir(parents=True, exist_ok=True)
+        fp = drive / "memory" / "identity.md"
+        fp.write_text("who-am-i", encoding="utf-8")
+
+        ctx = _mk_ctx(repo, drive)
+        out = _drive_read(ctx, "identity.md")
+        assert out == "who-am-i"
+
+
+def test_drive_read_legacy_drive_root_prefix_maps_correctly():
+    with tempfile.TemporaryDirectory() as td:
+        repo = pathlib.Path(td) / "repo"
+        drive = pathlib.Path(td) / "data"
+        repo.mkdir(parents=True, exist_ok=True)
+        (drive / "logs").mkdir(parents=True, exist_ok=True)
+        fp = drive / "logs" / "progress.jsonl"
+        fp.write_text("{\"ok\":true}\n", encoding="utf-8")
+
+        ctx = _mk_ctx(repo, drive)
+        out = _drive_read(ctx, "drive_root/logs/progress.jsonl")
+        assert "{\"ok\":true}" in out
+
+
+def test_repo_read_identity_redirects_to_drive_memory_file():
+    with tempfile.TemporaryDirectory() as td:
+        repo = pathlib.Path(td) / "repo"
+        drive = pathlib.Path(td) / "data"
+        repo.mkdir(parents=True, exist_ok=True)
+        (drive / "memory").mkdir(parents=True, exist_ok=True)
+        fp = drive / "memory" / "identity.md"
+        fp.write_text("identity-from-drive", encoding="utf-8")
+
+        ctx = _mk_ctx(repo, drive)
+        out = _repo_read(ctx, "identity.md")
+        assert out == "identity-from-drive"
