@@ -650,9 +650,16 @@ def _handle_text_response(
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """
-    if content and content.strip():
-        llm_trace["assistant_notes"].append(content.strip()[:320])
-    return (content or ""), accumulated_usage, llm_trace
+    text = str(content or "")
+    low = text.lower()
+    if "<tool_call>" in low and "</tool_call>" in low:
+        text = (
+            "⚠️ Остановил цикл: модель вернула служебный tool_call вместо ответа. "
+            "Сформулируй запрос ещё раз, отвечу коротко и по делу."
+        )
+    if text.strip():
+        llm_trace["assistant_notes"].append(text.strip()[:320])
+    return text, accumulated_usage, llm_trace
 
 
 def _check_budget_limits(
