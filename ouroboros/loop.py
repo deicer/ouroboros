@@ -637,6 +637,7 @@ def _handle_tool_calls(
         task_id,
         round_idx,
         task_type,
+        tools=tools,
     )
 
 
@@ -1774,6 +1775,7 @@ def _process_tool_results(
     task_id: str,
     round_idx: int,
     task_type: str = "task",
+    tools: Optional[ToolRegistry] = None,
 ) -> int:
     """
     Process tool execution results and append to messages/trace.
@@ -1828,7 +1830,156 @@ def _process_tool_results(
             },
         )
 
+        auto_commit = _maybe_auto_commit_after_code_tool(
+            tools=tools,
+            source_tool=fn_name,
+            source_is_error=bool(is_error),
+            drive_logs=drive_logs,
+            task_id=task_id,
+            task_type=task_type,
+            round_idx=round_idx,
+            emit_progress=emit_progress,
+        )
+        if auto_commit:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[AUTO_COMMIT] "
+                    + truncate_for_log(str(auto_commit.get("result") or ""), 900)
+                ),
+            })
+            llm_trace["tool_calls"].append({
+                "tool": str(auto_commit.get("tool") or "repo_commit_push"),
+                "args": _safe_args(auto_commit.get("args") or {}),
+                "result": truncate_for_log(str(auto_commit.get("result") or ""), 700),
+                "is_error": bool(auto_commit.get("is_error")),
+            })
+            if bool(auto_commit.get("is_error")):
+                error_count += 1
+
     return error_count
+
+
+def _auto_commit_enabled() -> bool:
+    return _env_bool("OUROBOROS_AUTO_COMMIT_AFTER_EDIT", default=True)
+
+
+def _auto_commit_tool_set() -> set[str]:
+    raw = str(
+        os.environ.get("OUROBOROS_AUTO_COMMIT_TOOLS", "opencode_edit,run_shell") or ""
+    ).strip()
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _auto_commit_message(source_tool: str, task_id: str, round_idx: int) -> str:
+    template = str(
+        os.environ.get(
+            "OUROBOROS_AUTO_COMMIT_MESSAGE",
+            "auto: persist changes after {tool} (task={task_id} round={round})",
+        )
+        or ""
+    ).strip()
+    if not template:
+        template = "auto: persist changes after {tool} (task={task_id} round={round})"
+    try:
+        msg = template.format(tool=source_tool, task_id=task_id, round=round_idx)
+    except Exception:
+        msg = f"auto: persist changes after {source_tool} (task={task_id} round={round_idx})"
+    msg = str(msg).strip()
+    return msg or f"auto: persist changes after {source_tool}"
+
+
+def _maybe_auto_commit_after_code_tool(
+    *,
+    tools: Optional[ToolRegistry],
+    source_tool: str,
+    source_is_error: bool,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    task_type: str,
+    round_idx: int,
+    emit_progress: Callable[[str], None],
+) -> Optional[Dict[str, Any]]:
+    """
+    Auto-commit dirty repo after successful code-edit tool execution.
+
+    Returns a synthetic repo_commit_push result dict (for trace/context), or None.
+    """
+    if tools is None or source_is_error:
+        return None
+    if not _auto_commit_enabled():
+        return None
+
+    source = str(source_tool or "").strip()
+    if source not in _auto_commit_tool_set():
+        return None
+
+    try:
+        status = str(tools.execute("git_status", {}))
+    except Exception as e:
+        _append_thinking_trace(
+            drive_logs,
+            source="task_loop",
+            step="auto_commit_status_error",
+            task_id=task_id,
+            task_type=task_type,
+            round_idx=round_idx,
+            details={"tool": source, "error": truncate_for_log(repr(e), 260)},
+        )
+        return None
+
+    if not status.strip() or status.startswith("⚠️"):
+        return None
+
+    commit_message = _auto_commit_message(source, task_id, round_idx)
+    commit_args = {"commit_message": commit_message}
+    args_for_log = sanitize_tool_args_for_log("repo_commit_push", commit_args)
+
+    try:
+        commit_result = str(tools.execute("repo_commit_push", commit_args))
+    except Exception as e:
+        commit_result = f"⚠️ TOOL_ERROR (repo_commit_push): {type(e).__name__}: {e}"
+
+    is_error = commit_result.startswith("⚠️")
+    append_jsonl(
+        drive_logs / "tools.jsonl",
+        {
+            "ts": utc_now_iso(),
+            "tool": "repo_commit_push",
+            "task_id": task_id,
+            "args": args_for_log,
+            "result_preview": sanitize_tool_result_for_log(
+                truncate_for_log(commit_result, 2000)
+            ),
+            "auto": True,
+            "source_tool": source,
+        },
+    )
+    _append_thinking_trace(
+        drive_logs,
+        source="task_loop",
+        step="auto_commit_result",
+        task_id=task_id,
+        task_type=task_type,
+        round_idx=round_idx,
+        details={
+            "source_tool": source,
+            "is_error": is_error,
+            "result_preview": truncate_for_log(commit_result, 500),
+        },
+    )
+    emit_progress(
+        "Автокоммит после правки: "
+        + ("успешно." if not is_error else "ошибка, см. результат.")
+    )
+    return {
+        "tool": "repo_commit_push",
+        "args": args_for_log,
+        "result": commit_result,
+        "is_error": is_error,
+    }
 
 
 def _safe_args(v: Any) -> Any:
