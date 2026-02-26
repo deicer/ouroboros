@@ -115,7 +115,7 @@ def _is_status_template_reply(text: str) -> bool:
     low = raw.lower()
     if any(low.startswith(marker) for marker in _STATUS_TEMPLATE_MARKERS):
         return True
-    return "текущее состояние" in low and ("следующий шаг" in low or "бюджет:" in low)
+    return "текущее состояние" in low and ("следующий шаг" in low or "модель" in low)
 
 
 def _text_similarity(a: str, b: str) -> float:
