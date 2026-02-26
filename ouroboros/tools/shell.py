@@ -52,6 +52,23 @@ def _truncate_output_bytes(text: str, limit_bytes: int) -> str:
     return head + f"\n...(truncated at {limit_bytes} bytes)...\n" + tail
 
 
+def _is_opencode_cli_invocation(cmd: List[str]) -> bool:
+    if not cmd:
+        return False
+    first = pathlib.Path(str(cmd[0] or "").strip()).name.lower()
+    if first in {"opencode", "opencode.exe"}:
+        return True
+    if first in {"bash", "sh", "zsh"} and len(cmd) >= 3:
+        script = str(cmd[2] or "").lower()
+        if "opencode " in script or script.strip().startswith("opencode"):
+            return True
+    if first in {"npx", "npm", "pnpm", "yarn", "bun"} and len(cmd) >= 2:
+        second = pathlib.Path(str(cmd[1] or "").strip()).name.lower()
+        if second in {"opencode", "@opencode/cli"}:
+            return True
+    return False
+
+
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     # Recover from LLM sending cmd as JSON string instead of list
     if isinstance(cmd, str):
@@ -96,6 +113,23 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     if not isinstance(cmd, list):
         return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
     cmd = [str(x) for x in cmd]
+
+    if _is_opencode_cli_invocation(cmd):
+        msg = (
+            "⚠️ RUN_SHELL_POLICY: Не запускай OpenCode CLI через run_shell. "
+            "Для правок кода используй tool opencode_edit; run_shell оставь для проверок/тестов."
+        )
+        try:
+            append_jsonl(ctx.drive_logs() / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "tool_warning",
+                "tool": "run_shell",
+                "warning": "run_shell_blocked_nested_opencode_cli",
+                "cmd_preview": truncate_for_log(" ".join(cmd), 500),
+            })
+        except Exception:
+            log.debug("Failed to log blocked nested opencode invocation", exc_info=True)
+        return msg
 
     timeout_sec = _run_shell_timeout_sec()
     output_cap_bytes = _run_shell_output_cap_bytes()

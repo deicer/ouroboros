@@ -33,3 +33,16 @@ def test_run_shell_blocks_escaped_cwd(tmp_path):
     ctx = _ctx(tmp_path)
     out = _run_shell(ctx, ["pwd"], cwd="../")
     assert "⚠️ PATH_ERROR" in out
+
+
+def test_run_shell_blocks_direct_opencode_cli(tmp_path):
+    ctx = _ctx(tmp_path)
+    out = _run_shell(ctx, ["opencode", "--version"])
+    assert "⚠️ RUN_SHELL_POLICY" in out
+    assert "opencode_edit" in out
+
+
+def test_run_shell_blocks_opencode_via_shell_wrapper(tmp_path):
+    ctx = _ctx(tmp_path)
+    out = _run_shell(ctx, ["bash", "-lc", "opencode --version"])
+    assert "⚠️ RUN_SHELL_POLICY" in out
