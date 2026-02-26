@@ -105,7 +105,16 @@ def _strip_background_preamble_for_user(text: str, task: Optional[Dict[str, Any]
                 return cleaned
 
     # No explicit answer section found — avoid leaking internal background report.
-    return "⚠️ Внутренний отчёт не должен был попасть в чат. Повтори запрос, отвечу по делу."
+    task_text = ""
+    if isinstance(task, dict):
+        task_text = str(task.get("text") or "").strip()
+    if task_text:
+        return (
+            "Понял. Убрал внутренний технический отчёт. "
+            f"По твоему запросу «{truncate_for_log(task_text.replace(chr(10), ' '), 180)}» "
+            "продолжаю и отвечаю только по делу."
+        )
+    return "Понял. Убрал внутренний технический отчёт и продолжаю по делу."
 
 
 def _is_status_template_reply(text: str) -> bool:

@@ -52,7 +52,9 @@ def test_strip_background_preamble_keeps_auto_resume_status_intact():
 def test_strip_background_preamble_fallback_when_no_answer_marker():
     source = "## Фоновый цикл: мысли\n\nТолько внутренний отчёт."
     out = _strip_background_preamble_for_user(source, task={"text": "обычный вопрос"})
-    assert out.startswith("⚠️ Внутренний отчёт")
+    assert out.startswith("Понял. Убрал внутренний технический отчёт.")
+    assert "⚠️ Внутренний отчёт не должен был попасть в чат" not in out
+    assert "обычный вопрос" in out
 
 
 def test_status_template_detection_and_similarity():
