@@ -132,6 +132,16 @@ READ_ONLY_PARALLEL_TOOLS = frozenset({
     "web_search", "codebase_digest", "chat_history",
 })
 
+# Read-only tools that often appear in "analysis loops" with no concrete output.
+READ_ONLY_LOOP_TOOLS = frozenset({
+    "repo_read", "repo_list",
+    "drive_read", "drive_list",
+    "git_status", "git_diff",
+    "chat_history", "codebase_digest",
+    "knowledge_list", "knowledge_read",
+    "list_available_tools",
+})
+
 # Stateful browser tools require thread-affinity (Playwright sync uses greenlet)
 STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
 
@@ -870,16 +880,19 @@ def _drain_incoming_messages(
     task_id: str,
     event_queue: Optional[queue.Queue],
     _owner_msg_seen: set,
-) -> None:
+) -> int:
     """
     Inject owner messages received during task execution.
     Drains both the in-process queue and the Drive mailbox.
     """
+    injected_count = 0
+
     # Inject owner messages received during task execution
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
             messages.append({"role": "user", "content": injected})
+            injected_count += 1
         except queue.Empty:
             break
 
@@ -892,6 +905,7 @@ def _drain_incoming_messages(
                 "role": "user",
                 "content": f"[Owner message during task]: {dmsg}",
             })
+            injected_count += 1
             # Log for duplicate processing detection (health invariant #5)
             if event_queue is not None:
                 try:
@@ -902,6 +916,8 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
+
+    return injected_count
 
 
 def run_llm_loop(
@@ -917,6 +933,7 @@ def run_llm_loop(
     event_queue: Optional[queue.Queue] = None,
     initial_effort: str = "medium",
     drive_root: Optional[pathlib.Path] = None,
+    is_direct_chat: bool = False,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -1047,6 +1064,12 @@ def run_llm_loop(
     except (ValueError, TypeError):
         MAX_ROUNDS = 200
         log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+    direct_chat_max_rounds = max(20, _env_int("OUROBOROS_DIRECT_CHAT_MAX_ROUNDS", 80))
+    effective_max_rounds = min(MAX_ROUNDS, direct_chat_max_rounds) if is_direct_chat else MAX_ROUNDS
+    owner_interrupt_grace_rounds = max(1, _env_int("OUROBOROS_OWNER_INTERRUPT_GRACE_ROUNDS", 3))
+    owner_interrupt_deadline_round: Optional[int] = None
+    read_only_streak = 0
+    read_only_streak_threshold = max(12, _env_int("OUROBOROS_DIRECT_CHAT_READ_ONLY_STREAK_STOP", 24))
     round_idx = 0
     try:
         while True:
@@ -1066,8 +1089,11 @@ def run_llm_loop(
             )
 
             # Hard limit on rounds to prevent runaway tasks
-            if round_idx > MAX_ROUNDS:
-                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
+            if round_idx > effective_max_rounds:
+                finish_reason = (
+                    f"⚠️ Task exceeded max rounds ({effective_max_rounds}). "
+                    "Останавливаю цикл и формирую финальный ответ по текущему прогрессу."
+                )
                 _append_thinking_trace(
                     drive_logs,
                     source="task_loop",
@@ -1075,7 +1101,7 @@ def run_llm_loop(
                     task_id=task_id,
                     task_type=task_type or "task",
                     round_idx=round_idx,
-                    details={"max_rounds": MAX_ROUNDS, "finish_reason": finish_reason},
+                    details={"max_rounds": effective_max_rounds, "finish_reason": finish_reason},
                 )
                 messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
                 try:
@@ -1092,7 +1118,7 @@ def run_llm_loop(
                     return finish_reason, accumulated_usage, llm_trace
 
             # Soft self-check reminder every 50 rounds (LLM-first: agent decides, not code)
-            _maybe_inject_self_check(round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress)
+            _maybe_inject_self_check(round_idx, effective_max_rounds, messages, accumulated_usage, emit_progress)
 
             # Apply LLM-driven model/effort switch (via switch_model tool)
             ctx = tools._ctx
@@ -1124,7 +1150,65 @@ def run_llm_loop(
                 )
 
             # Inject owner messages (in-process queue + Drive mailbox)
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            injected_owner_count = _drain_incoming_messages(
+                messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen
+            )
+            if injected_owner_count > 0 and is_direct_chat:
+                owner_interrupt_deadline_round = round_idx + owner_interrupt_grace_rounds
+                emit_progress("📩 Получил новое сообщение во время задачи. Перехожу к приоритетному ответу.")
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[OWNER_INTERRUPT] Во время выполнения пришло новое сообщение владельца. "
+                        "Сверни текущую диагностику и подготовь прямой ответ по последнему сообщению. "
+                        "Избегай длинных серий read-only инструментов."
+                    ),
+                })
+
+            if (
+                is_direct_chat
+                and owner_interrupt_deadline_round is not None
+                and round_idx >= owner_interrupt_deadline_round
+            ):
+                force_msg = (
+                    "⚠️ Прерываю длинную задачу: пришло новое сообщение владельца, "
+                    "нужен немедленный ответ без дальнейших инструментов."
+                )
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="owner_interrupt_force_finalize",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={"grace_rounds": owner_interrupt_grace_rounds},
+                )
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "task_loop_guard_stop",
+                    "task_id": task_id,
+                    "reason": "owner_interrupt_force_finalize",
+                    "round": int(round_idx),
+                })
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[FORCE_FINALIZE] Ответь пользователю СЕЙЧАС. "
+                        "Не вызывай инструменты. Дай короткий статус и следующий шаг."
+                    ),
+                })
+                try:
+                    final_msg, _ = _call_llm_with_retry(
+                        llm, messages, active_model, None, active_effort,
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                        on_api_error=_on_llm_api_error,
+                    )
+                    if final_msg and str(final_msg.get("content") or "").strip():
+                        return str(final_msg.get("content") or ""), accumulated_usage, llm_trace
+                    return force_msg, accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Forced finalize on owner interrupt failed", exc_info=True)
+                    return force_msg, accumulated_usage, llm_trace
 
             # Compact old tool history when needed
             # Check for LLM-requested compaction first (via compact_context tool)
@@ -1282,6 +1366,66 @@ def run_llm_loop(
                 task_type=task_type or "task",
                 emit_progress=emit_progress,
             )
+
+            # Direct-chat safety: stop long read-only spirals early.
+            recent_batch = (llm_trace.get("tool_calls") or [])[-len(tool_calls):]
+            if (
+                recent_batch
+                and all(
+                    isinstance(item, dict)
+                    and (not bool(item.get("is_error")))
+                    and str(item.get("tool") or "") in READ_ONLY_LOOP_TOOLS
+                    for item in recent_batch
+                )
+            ):
+                read_only_streak += 1
+            else:
+                read_only_streak = 0
+
+            if is_direct_chat and read_only_streak >= read_only_streak_threshold:
+                final = (
+                    "⚠️ Остановил зациклившуюся диагностику: слишком много подряд read-only шагов "
+                    "без финального ответа. Дай краткий статус и чёткий следующий шаг."
+                )
+                _append_thinking_trace(
+                    drive_logs,
+                    source="task_loop",
+                    step="direct_chat_read_only_guard_stop",
+                    task_id=task_id,
+                    task_type=task_type or "task",
+                    round_idx=round_idx,
+                    details={
+                        "read_only_streak": int(read_only_streak),
+                        "threshold": int(read_only_streak_threshold),
+                    },
+                )
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "task_loop_guard_stop",
+                    "task_id": task_id,
+                    "reason": "direct_chat_read_only_spiral",
+                    "read_only_streak": int(read_only_streak),
+                    "threshold": int(read_only_streak_threshold),
+                })
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[ANTI_LOOP_DIRECT_CHAT] Ты застрял в read-only диагностике. "
+                        "Немедленно дай финальный ответ владельцу. Без инструментов."
+                    ),
+                })
+                try:
+                    final_msg, _ = _call_llm_with_retry(
+                        llm, messages, active_model, None, active_effort,
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                        on_api_error=_on_llm_api_error,
+                    )
+                    if final_msg and str(final_msg.get("content") or "").strip():
+                        return str(final_msg.get("content") or ""), accumulated_usage, llm_trace
+                    return final, accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Direct-chat read-only guard finalize failed", exc_info=True)
+                    return final, accumulated_usage, llm_trace
 
             # Detect repeated failure patterns (e.g. same Unknown tool) and stop early.
             current_error_sig = _batch_error_signature(llm_trace, len(tool_calls))

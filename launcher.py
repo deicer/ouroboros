@@ -607,6 +607,25 @@ offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
 _last_message_ts: float = time.time()  # Start in active mode after restart
 _ACTIVE_MODE_SEC: int = 300  # 5 min of activity = active polling mode
+_BUSY_ACK_COOLDOWN_SEC: int = max(3, int(os.environ.get("OUROBOROS_BUSY_ACK_COOLDOWN_SEC", "20") or "20"))
+
+
+def _maybe_send_busy_ack(chat_id: int) -> None:
+    """Send a short busy ack to owner, throttled by state timestamp."""
+    try:
+        st = load_state()
+        now_ts = float(time.time())
+        last_ts = float(st.get("busy_ack_last_ts") or 0.0)
+        if (now_ts - last_ts) < float(_BUSY_ACK_COOLDOWN_SEC):
+            return
+        st["busy_ack_last_ts"] = now_ts
+        save_state(st)
+    except Exception:
+        log.debug("Failed to update busy ack throttle state", exc_info=True)
+    send_with_budget(
+        chat_id,
+        "⏳ Я в процессе текущей задачи. Сообщение получил и учту его в этом же цикле.",
+    )
 
 # Auto-start background consciousness (default: always on)
 try:
@@ -732,6 +751,7 @@ while True:
                 send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
             elif text:
                 agent.inject_message(text)
+                _maybe_send_busy_ack(chat_id)
 
         else:
             # FREE PATH: batch-collect burst messages, then dispatch (single consumer)
@@ -806,6 +826,7 @@ while True:
             if agent._busy:
                 if final_text:
                     agent.inject_message(final_text)
+                    _maybe_send_busy_ack(chat_id)
                 if _batched_image:
                     send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
             else:
