@@ -54,6 +54,7 @@ launcher.py (supervisor loop)
 - `loop.py`: основной цикл LLM + tools, usage accounting, fallback, context compaction.
 - `context.py`: формирование сообщений для LLM, инъекции памяти/правил.
 - `memory.py`: scratchpad/identity/goals/history + авто-суммаризация старого чата.
+- `memory_backends.py`: backend-абстракция для knowledge tools (Mem0 + file fallback).
 - `llm.py`: модели, провайдер, учёт токенов/стоимости.
 - `tools/`: инструментальный слой (repo/shell/opencode/search/control/...).
 
@@ -67,6 +68,7 @@ launcher.py (supervisor loop)
 - `state/state.json`: owner, budget, runtime flags, counters.
 - `logs/*.jsonl`: события, tool calls, supervisor, thinking trace, evolution log.
 - `memory/*`: scratchpad, identity, goals, summaries.
+- `memory/mem0_history.db`: локальная history-база Mem0.
 - `task_results/*`: результаты задач для parent/child workflow.
 
 ### 4.3 Логи (наблюдаемость)
@@ -105,6 +107,8 @@ launcher.py (supervisor loop)
 - `memory/scratchpad.md`: краткосрочный рабочий контекст.
 - `memory/goals.json`: цели и статус.
 - `memory/chat_history_summary.md` + `logs/chat.archive.jsonl`: деградация старой переписки.
+- knowledge layer: `knowledge_*` инструменты по умолчанию используют Mem0 (Qdrant + Gemini),
+  при недоступности автоматически деградируют на file backend (`memory/knowledge/*.md`).
 
 Принцип: после рестарта агент должен восстановить контекст из памяти и логов, а не начинать с нуля.
 

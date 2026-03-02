@@ -357,7 +357,8 @@ Self-improvement в этой архитектуре выглядит так:
 - `/data/memory/scratchpad.md`: рабочая память.
 - `/data/memory/identity.md`: “кто я”.
 - `/data/memory/USER_CONTEXT.md`: информация о владельце (ограничение по размеру задаётся BIBLE).
-- `/data/memory/knowledge/*.md`: topic-based knowledge base + `_index.md`.
+- `/data/memory/mem0_history.db`: history-база Mem0.
+- `/data/memory/knowledge/*.md`: file-fallback knowledge backend (`knowledge_*` используют это только при недоступности Mem0).
 - `/data/memory/owner_mailbox/<task_id>.jsonl`: сообщения владельца для конкретной фоновой задачи.
 - `/data/task_results/<task_id>.json`: результаты подзадач для `get_task_result`.
 - `/data/archive/rescue/...`: rescue snapshots перед reset’ами, если были грязные изменения.
@@ -380,6 +381,7 @@ Self-improvement в этой архитектуре выглядит так:
 
 - `TAVILY_API_KEY` (включает `web_search` через Tavily; основной и рекомендуемый backend)
 - `OPENAI_API_KEY` (резервный backend для `web_search` через OpenAI Responses API)
+- `GOOGLE_API_KEY` (ключ Gemini для Mem0 embedder/LLM)
 
 Тюнинг:
 
@@ -387,6 +389,10 @@ Self-improvement в этой архитектуре выглядит так:
 - `OUROBOROS_MODEL_FALLBACK_LIST`
 - `OUROBOROS_TAVILY_BASE_URL`, `OUROBOROS_TAVILY_SEARCH_DEPTH`, `OUROBOROS_TAVILY_TOPIC`
 - `OUROBOROS_TAVILY_MAX_RESULTS`, `OUROBOROS_TAVILY_INCLUDE_ANSWER`, `OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT`
+- `OUROBOROS_KNOWLEDGE_BACKEND`, `OUROBOROS_MEM0_ENABLED`, `OUROBOROS_MEM0_USER_ID`
+- `OUROBOROS_MEM0_INFER`, `OUROBOROS_MEM0_MAX_MEMORIES`
+- `OUROBOROS_MEM0_QDRANT_URL`, `OUROBOROS_MEM0_QDRANT_COLLECTION`
+- `OUROBOROS_MEM0_EMBED_MODEL`, `OUROBOROS_MEM0_LLM_MODEL`
 - `OUROBOROS_MAX_WORKERS`, `OUROBOROS_MAX_ROUNDS`
 - `OUROBOROS_SOFT_TIMEOUT_SEC`, `OUROBOROS_HARD_TIMEOUT_SEC`
 - `OUROBOROS_BG_BUDGET_PCT`

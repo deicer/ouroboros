@@ -5,7 +5,18 @@ services:
     cpus: 1.0
     mem_limit: 2g
     env_file: .env
+    depends_on:
+      - qdrant
     ports:
       - "${OUROBOROS_TRACE_WEB_PORT:-8088}:${OUROBOROS_TRACE_WEB_PORT:-8088}"
     volumes:
       - ./data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    restart: on-failure
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

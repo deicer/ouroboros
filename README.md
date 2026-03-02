@@ -74,6 +74,7 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 | `TELEGRAM_BOT_TOKEN` | Yes | Create a bot via [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`), copy the token |
 | `GITHUB_TOKEN` | Yes | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) -- Fine-grained token with **Contents: Read and write** on your fork |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
+| `GOOGLE_API_KEY` | No | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) -- Enables Mem0 knowledge backend (Gemini embedder/LLM) |
 | `OPENCODE_API_KEY` | No | OpenCode API key for OpenCode Zen provider (including free models) |
 | `ANTHROPIC_API_KEY` | No | Optional provider key (for OpenCode/provider integrations) |
 | `TOTAL_BUDGET` | No | Fallback spending limit in USD if OpenRouter key has no limit set |
@@ -104,6 +105,7 @@ docker compose up -d --build
 ```
 
 First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI, OpenCode CLI).
+Compose starts both `ouroboros` and `qdrant` (used by Mem0 knowledge backend by default).
 
 Check logs: `docker compose logs -f`
 
@@ -228,6 +230,7 @@ Full text: [BIBLE.md](BIBLE.md)
 |----------|-------------|
 | `TAVILY_API_KEY` | Enables `web_search` with Tavily (primary, recommended) |
 | `OPENAI_API_KEY` | Optional fallback for `web_search` when Tavily is unavailable |
+| `GOOGLE_API_KEY` | Enables Mem0 knowledge backend (`knowledge_*`) with Gemini |
 | `OPENCODE_API_KEY` | OpenCode API key for OpenCode Zen provider (including free models) |
 | `ANTHROPIC_API_KEY` | Optional provider key for OpenCode/provider integrations |
 | `TOTAL_BUDGET` | Fallback spending limit in USD (only used if OpenRouter key has no limit set) |
@@ -251,6 +254,15 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_TAVILY_MAX_RESULTS` | `5` | Default Tavily `max_results` (0..20) |
 | `OUROBOROS_TAVILY_INCLUDE_ANSWER` | `basic` | Tavily answer mode (`false`,`true`,`basic`,`advanced`) |
 | `OUROBOROS_TAVILY_INCLUDE_RAW_CONTENT` | `false` | Tavily raw content mode (`false`,`true`,`text`,`markdown`) |
+| `OUROBOROS_KNOWLEDGE_BACKEND` | `mem0` | Knowledge backend selector: `mem0` or `file` |
+| `OUROBOROS_MEM0_ENABLED` | `true` | Global on/off switch for Mem0 backend |
+| `OUROBOROS_MEM0_USER_ID` | `ouroboros-agent` | Mem0 scope id used by `knowledge_*` tools |
+| `OUROBOROS_MEM0_INFER` | `true` | Enable Mem0 infer/fact-extraction pipeline on writes |
+| `OUROBOROS_MEM0_MAX_MEMORIES` | `500` | Max records to scan per Mem0 read/list operation |
+| `OUROBOROS_MEM0_QDRANT_URL` | `http://qdrant:6333` | Qdrant endpoint for Mem0 vector storage |
+| `OUROBOROS_MEM0_QDRANT_COLLECTION` | `mem0` | Qdrant collection name for Mem0 records |
+| `OUROBOROS_MEM0_EMBED_MODEL` | `models/text-embedding-004` | Gemini embedding model for Mem0 |
+| `OUROBOROS_MEM0_LLM_MODEL` | `gemini-2.5-flash` | Gemini LLM model for Mem0 infer operations |
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC` | `1800` | Max age (seconds) for `openrouter_limit_remaining` before forced OpenRouter refresh |
