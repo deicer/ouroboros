@@ -23,6 +23,7 @@ from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.llm import (
     LLMClient,
     add_usage,
+    get_code_model_from_env,
     get_fallback_models_from_env,
     get_free_models_from_env,
     get_paid_models_from_env,
@@ -201,13 +202,21 @@ def _is_complex_task_type(task_type: str) -> bool:
     }
 
 
-def _pick_initial_model(default_model: str, task_type: str) -> str:
+def _pick_initial_model(default_model: str, task_type: str, *, is_direct_chat: bool = False) -> str:
     """
     Pick initial model:
-    - complex tasks: first paid candidate (if configured),
-    - all other tasks: first free candidate (if configured),
+    - direct chat: main/default model,
+    - non-direct worker tasks: code model when configured,
+    - complex tasks: paid candidate fallback,
     - fallback: default model.
     """
+    if is_direct_chat:
+        return default_model
+
+    code_model = get_code_model_from_env()
+    if code_model and code_model != default_model:
+        return code_model
+
     paid_candidates = get_paid_models_from_env(active_model="")
     free_candidates = get_free_models_from_env(active_model="")
 
@@ -997,7 +1006,11 @@ def run_llm_loop(
     # Model router:
     # - default to free list for normal tasks,
     # - start with paid list for explicitly complex tasks.
-    active_model = _pick_initial_model(llm.default_model(), task_type)
+    active_model = _pick_initial_model(
+        llm.default_model(),
+        task_type,
+        is_direct_chat=is_direct_chat,
+    )
     active_effort = initial_effort
 
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}

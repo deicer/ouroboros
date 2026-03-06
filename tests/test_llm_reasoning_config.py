@@ -38,6 +38,12 @@ def test_non_grok_models_keep_effort(monkeypatch):
     assert cfg == {"effort": "high", "exclude": True}
 
 
+def test_local_llm_reasoning_omits_openrouter_only_exclude(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://127.0.0.1:2455/v1")
+    cfg = build_reasoning_config("gpt-5.4", reasoning_effort="medium")
+    assert cfg == {"effort": "medium"}
+
+
 def test_is_free_model_heuristics():
     assert is_free_model("arcee-ai/trinity-large-preview:free") is True
     assert is_free_model("opencode/minimax-m2.5-free") is True

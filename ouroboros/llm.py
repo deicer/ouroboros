@@ -196,6 +196,12 @@ def get_light_model_from_env() -> str:
     return light or get_main_model_from_env()
 
 
+def get_code_model_from_env() -> str:
+    refresh_model_env_from_dotenv(force=False)
+    code = _env_model("OUROBOROS_MODEL_CODE")
+    return code or get_main_model_from_env()
+
+
 def get_allowed_models_from_env() -> List[str]:
     refresh_model_env_from_dotenv(force=False)
     main = _env_model("OUROBOROS_MODEL")
@@ -300,6 +306,7 @@ def build_reasoning_config(model: str, reasoning_effort: str = "medium") -> Dict
     """Build OpenRouter reasoning config for the selected model."""
     model_name = str(model or "").strip()
     effort = normalize_reasoning_effort(reasoning_effort, default="medium")
+    include_exclude = should_use_openrouter_budget()
 
     # Grok 4.1 Fast: use the explicit reasoning.enabled toggle.
     if model_name.startswith("x-ai/grok-4.1-fast"):
@@ -307,16 +314,16 @@ def build_reasoning_config(model: str, reasoning_effort: str = "medium") -> Dict
         enabled = _env_bool("OUROBOROS_REASONING_ENABLED", default=enabled_default)
         if effort == "none":
             enabled = False
-        return {
-            "enabled": enabled,
-            "exclude": True,
-        }
+        cfg: Dict[str, Any] = {"enabled": enabled}
+        if include_exclude:
+            cfg["exclude"] = True
+        return cfg
 
     # Generic OpenRouter-compatible reasoning control for other models.
-    return {
-        "effort": effort,
-        "exclude": True,
-    }
+    cfg = {"effort": effort}
+    if include_exclude:
+        cfg["exclude"] = True
+    return cfg
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
