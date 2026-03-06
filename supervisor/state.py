@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ouroboros.llm import should_use_openrouter_budget
 from ouroboros.utils import append_jsonl  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -323,6 +324,8 @@ def openrouter_budget_remaining(st: Dict[str, Any]) -> float:
 
     Returns float('inf') if OpenRouter limit not yet fetched.
     """
+    if not should_use_openrouter_budget():
+        return float('inf')
     max_age_sec = _openrouter_budget_max_age_sec()
     if _is_openrouter_budget_stale(st, max_age_sec):
         try:
@@ -341,6 +344,8 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
 
     Returns dict with total_usd, daily_usd, limit, and limit_remaining, or None on error.
     """
+    if not should_use_openrouter_budget():
+        return None
     try:
         import urllib.request
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()

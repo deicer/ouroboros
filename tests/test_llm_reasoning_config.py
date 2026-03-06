@@ -2,11 +2,15 @@ import os
 
 from ouroboros.llm import (
     build_reasoning_config,
+    get_llm_api_key,
+    get_llm_base_url,
     get_fallback_models_from_env,
     get_free_models_from_env,
     get_paid_models_from_env,
     is_free_model,
+    should_use_openrouter_budget,
     refresh_model_env_from_dotenv,
+    LLMClient,
 )
 
 
@@ -122,3 +126,23 @@ def test_refresh_model_env_from_dotenv_runtime(tmp_path, monkeypatch):
     assert os.environ.get("OUROBOROS_MODEL") == "anthropic/claude-sonnet-4.6"
     assert os.environ.get("OUROBOROS_MODEL_PAID_LIST") == "anthropic/claude-sonnet-4.6,x-ai/grok-4.1-fast"
     assert os.environ.get("OUROBOROS_MODEL_FREE_LIST") == "arcee-ai/trinity-large-preview:free"
+
+
+def test_local_llm_base_url_and_dummy_key(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://127.0.0.1:2455/v1")
+    monkeypatch.delenv("OUROBOROS_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    assert get_llm_base_url() == "http://127.0.0.1:2455/v1"
+    assert get_llm_api_key() == "dummy"
+    assert should_use_openrouter_budget() is False
+
+
+def test_llm_client_defaults_to_env_overrides(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://127.0.0.1:2455/v1")
+    monkeypatch.setenv("OUROBOROS_LLM_API_KEY", "sk-clb-test")
+
+    client = LLMClient()
+
+    assert client._base_url == "http://127.0.0.1:2455/v1"
+    assert client._api_key == "sk-clb-test"

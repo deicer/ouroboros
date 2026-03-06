@@ -13,8 +13,11 @@ import pathlib
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
+
+DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1"
 
 _MODEL_ENV_KEYS = [
     "OUROBOROS_MODEL",
@@ -33,6 +36,42 @@ _ENV_REFRESH_MANAGED: Dict[str, str] = {}
 
 def _env_model(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
+
+
+def get_llm_base_url() -> str:
+    raw = str(os.environ.get("OUROBOROS_LLM_BASE_URL", "") or "").strip()
+    if raw:
+        return raw.rstrip("/")
+    return DEFAULT_LLM_BASE_URL
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    parsed = urlparse(str(base_url or "").strip())
+    host = (parsed.hostname or "").strip().lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def get_llm_api_key() -> str:
+    explicit = str(os.environ.get("OUROBOROS_LLM_API_KEY", "") or "").strip()
+    if explicit:
+        return explicit
+
+    legacy = str(os.environ.get("OPENROUTER_API_KEY", "") or "").strip()
+    if legacy:
+        return legacy
+
+    if _is_local_base_url(get_llm_base_url()):
+        return "dummy"
+
+    return ""
+
+
+def should_use_openrouter_budget() -> bool:
+    return get_llm_base_url().rstrip("/") == DEFAULT_LLM_BASE_URL
+
+
+def get_chat_completions_url() -> str:
+    return f"{get_llm_base_url().rstrip('/')}/chat/completions"
 
 
 def _env_model_list(name: str) -> List[str]:
@@ -311,7 +350,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
         return {}
 
     try:
-        url = "https://openrouter.ai/api/v1/models"
+        url = f"{get_llm_base_url().rstrip('/')}/models"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
 
@@ -366,10 +405,10 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = "",
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._api_key = str(api_key or get_llm_api_key() or "").strip()
+        self._base_url = str(base_url or get_llm_base_url() or DEFAULT_LLM_BASE_URL).rstrip("/")
         self._client = None
 
     def _get_client(self):

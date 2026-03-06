@@ -245,6 +245,38 @@ def test_opencode_edit_fast_path_applies_simple_replace(tmp_path, monkeypatch):
     assert last["ok"] is True
 
 
+def test_opencode_edit_self_edit_only_blocks_external_cli(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _opencode_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    monkeypatch.setenv("OUROBOROS_SELF_EDIT_ONLY", "1")
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setattr(
+        "ouroboros.tools.shell._ensure_opencode_cli",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("OpenCode CLI must stay disabled")),
+    )
+
+    ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+    result = _opencode_edit(ctx, "Refactor the project architecture.")
+
+    assert "SELF_EDIT_ONLY" in result
+
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["tool"] == "opencode_edit"
+    assert last["route"] == "self_edit_only"
+    assert last["ok"] is False
+
+
 def test_opencode_edit_fast_path_falls_back_to_opencode(tmp_path, monkeypatch):
     from ouroboros.tools import git as git_tools
     from ouroboros.tools.registry import ToolContext

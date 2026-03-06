@@ -198,6 +198,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
+def _self_edit_only_enabled() -> bool:
+    return _env_bool("OUROBOROS_SELF_EDIT_ONLY", default=False)
+
+
 def _append_tool_event(ctx: ToolContext, payload: Dict[str, Any]) -> None:
     try:
         append_jsonl(
@@ -792,7 +796,7 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
 
 
 def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Edit code via adaptive route: fast local patch for simple fixes, otherwise OpenCode CLI."""
+    """Edit code via adaptive route: fast local patch first, optional OpenCode CLI only when enabled."""
     started = time.monotonic()
 
     def _finish(
@@ -854,7 +858,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             failure_reason="prompt_too_large",
         )
 
-    if getattr(ctx, "is_direct_chat", False) and _env_bool(
+    if (not _self_edit_only_enabled()) and getattr(ctx, "is_direct_chat", False) and _env_bool(
         "OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT",
         default=True,
     ):
@@ -929,10 +933,37 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                     fast_edit_file=str(fast.get("file") or ""),
                     fast_edit_replacements=int(fast.get("replacements_applied") or 0),
                 )
+            if _self_edit_only_enabled():
+                return _finish(
+                    "⚠️ SELF_EDIT_ONLY: external OpenCode fallback is disabled. "
+                    "Use a structured self-edit prompt in the form:\n"
+                    "FILE: path/to/file\nREPLACE: old text\nWITH: new text\nCOUNT: 1",
+                    ok=False,
+                    route="self_edit_only",
+                    fallback_used=False,
+                    attempts_total=0,
+                    models_tried=[],
+                    budget_exhausted=False,
+                    failure_reason="self_edit_only_fast_path_failed",
+                    fast_edit_reason=fast_edit_reason,
+                )
             route = "fallback_to_opencode"
             fallback_used = True
             ctx.emit_progress_fn("Fast local edit failed, delegating to OpenCode CLI...")
         else:
+            if _self_edit_only_enabled():
+                return _finish(
+                    "⚠️ SELF_EDIT_ONLY: OpenCode CLI is disabled by OUROBOROS_SELF_EDIT_ONLY=1. "
+                    "Use a structured self-edit prompt in the form:\n"
+                    "FILE: path/to/file\nREPLACE: old text\nWITH: new text\nCOUNT: 1",
+                    ok=False,
+                    route="self_edit_only",
+                    fallback_used=False,
+                    attempts_total=0,
+                    models_tried=[],
+                    budget_exhausted=False,
+                    failure_reason="self_edit_only_requires_structured_prompt",
+                )
             ctx.emit_progress_fn("Delegating to OpenCode CLI...")
 
         full_prompt = (
@@ -1130,7 +1161,11 @@ def get_tools() -> List[ToolEntry]:
         }, _run_shell, is_code_tool=True, timeout_sec=_run_shell_timeout_sec()),
         ToolEntry("opencode_edit", {
             "name": "opencode_edit",
-            "description": "Delegate code edits to OpenCode CLI. The sole way to edit code. Follow with repo_commit_push.",
+            "description": (
+                "Edit code. Applies internal self-edit fast path first; "
+                "when OUROBOROS_SELF_EDIT_ONLY is disabled it may fall back to OpenCode CLI. "
+                "Follow with repo_commit_push."
+            ),
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},

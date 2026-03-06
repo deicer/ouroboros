@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from ouroboros.llm import get_llm_api_key, get_llm_base_url
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 
@@ -198,7 +199,10 @@ def _openai_web_search(query: str, api_key: str) -> Dict[str, Any]:
     """Fallback web search via OpenAI Responses web_search tool."""
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(
+        api_key=(api_key or get_llm_api_key()),
+        base_url=get_llm_base_url(),
+    )
     model = (os.environ.get("OUROBOROS_WEBSEARCH_MODEL") or os.environ.get("OUROBOROS_MODEL") or "").strip()
     if not model:
         raise RuntimeError("OUROBOROS_WEBSEARCH_MODEL (or OUROBOROS_MODEL) is required for OpenAI web search")

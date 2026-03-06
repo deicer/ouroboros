@@ -10,6 +10,7 @@ import asyncio
 import logging
 import httpx
 
+from ouroboros.llm import get_chat_completions_url, get_llm_api_key
 from ouroboros.utils import utc_now_iso
 from ouroboros.tools.registry import ToolEntry, ToolContext
 
@@ -20,9 +21,6 @@ log = logging.getLogger(__name__)
 MAX_MODELS = 10
 # Concurrency limit for parallel requests
 CONCURRENCY_LIMIT = 5
-
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
 
 def get_tools():
     """Return list of ToolEntry for registry."""
@@ -92,7 +90,7 @@ async def _query_model(client, model, messages, api_key, semaphore):
     async with semaphore:
         try:
             resp = await client.post(
-                OPENROUTER_URL,
+                get_chat_completions_url(),
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -146,9 +144,9 @@ async def _multi_model_review_async(content: str, prompt: str, models: list, ctx
     if len(models) == 0:
         return {"error": "At least one model is required"}
 
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = get_llm_api_key()
     if not api_key:
-        return {"error": "OPENROUTER_API_KEY not set"}
+        return {"error": "LLM API key not set"}
 
     messages = [
         {"role": "system", "content": prompt},

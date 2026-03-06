@@ -77,3 +77,34 @@ def test_openrouter_budget_remaining_refreshes_stale_snapshot(tmp_path, monkeypa
 
     remaining = state.openrouter_budget_remaining(state.load_state())
     assert float(remaining) == 77.0
+
+
+def test_local_llm_mode_ignores_openrouter_budget_snapshot(tmp_path, monkeypatch):
+    state.init(tmp_path)
+    old_ts = _iso_utc(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=3))
+
+    st = state.default_state_dict()
+    st["openrouter_limit_remaining"] = 5.0
+    st["openrouter_limit_remaining_updated_at"] = old_ts
+    st["openrouter_last_check_at"] = old_ts
+    state.save_state(st)
+
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://127.0.0.1:2455/v1")
+
+    calls = {"n": 0}
+
+    def _fake_gt():
+        calls["n"] += 1
+        return {
+            "total_usd": 1.0,
+            "daily_usd": 0.1,
+            "limit": 100.0,
+            "limit_remaining": 77.0,
+        }
+
+    monkeypatch.setattr(state, "check_openrouter_ground_truth", _fake_gt)
+
+    remaining = state.openrouter_budget_remaining(state.load_state())
+
+    assert remaining == float("inf")
+    assert calls["n"] == 0

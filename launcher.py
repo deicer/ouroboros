@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ouroboros.apply_patch import install as install_apply_patch
+from ouroboros.llm import should_use_openrouter_budget
 install_apply_patch()
 
 # ----------------------------
@@ -59,7 +60,11 @@ def _parse_bool_cfg(raw: Optional[str], default: bool = False) -> bool:
         return False
     return default
 
-OPENROUTER_API_KEY = get_secret("OPENROUTER_API_KEY", required=True)
+OPENROUTER_API_KEY = get_secret(
+    "OPENROUTER_API_KEY",
+    default="",
+    required=should_use_openrouter_budget(),
+) or ""
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", required=True)
 GITHUB_TOKEN = get_secret("GITHUB_TOKEN", required=True)
 
