@@ -156,7 +156,7 @@ python3 -m pip install -r requirements-dev.txt
 
 ### OpenCode Quick Check
 
-If code editing fails, run:
+If `OUROBOROS_SELF_EDIT_ONLY` is disabled and code editing fails, run:
 
 ```bash
 docker compose exec -T ouroboros opencode --version
@@ -164,7 +164,7 @@ docker compose exec -T ouroboros opencode models opencode
 docker compose exec -T ouroboros opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json
 ```
 
-`opencode_edit` сначала пытается восстановить окружение сам: если бинарь `opencode` отсутствует, агент запускает автоустановку и проверяет `opencode --version`.
+`opencode_edit` сначала пытается применить внутренний self-edit fast path. Если `OUROBOROS_SELF_EDIT_ONLY=false`, он может затем попытаться восстановить окружение OpenCode CLI: если бинарь `opencode` отсутствует, агент запускает автоустановку и проверяет `opencode --version`.
 
 If default `opencode run ...` returns Copilot 403, ensure `/app/opencode.json` exists and points to provider `opencode`.
 
@@ -220,7 +220,7 @@ Full text: [BIBLE.md](BIBLE.md)
 
 | Variable | Description |
 |----------|-------------|
-| `OPENROUTER_API_KEY` | OpenRouter API key for LLM calls |
+| `OPENROUTER_API_KEY` | OpenRouter API key for LLM calls. Not required when `OUROBOROS_LLM_BASE_URL` points to a local/custom OpenAI-compatible API |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
 | `GITHUB_TOKEN` | GitHub personal access token with `repo` scope |
 
@@ -241,7 +241,9 @@ Full text: [BIBLE.md](BIBLE.md)
 |----------|---------|-------------|
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
-| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
+| `OUROBOROS_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the built-in OpenAI-compatible LLM client. Example local mode: `http://127.0.0.1:2455/v1` |
+| `OUROBOROS_LLM_API_KEY` | *(empty)* | Optional explicit API key for the LLM base URL. For localhost URLs, Ouroboros falls back to `dummy` automatically |
+| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model |
 | `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |
 | `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
 | `OUROBOROS_MODEL_PAID_LIST` | *(empty)* | Ordered paid-model priority list (comma-separated, first = highest priority) |
@@ -261,11 +263,12 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_MEM0_MAX_MEMORIES` | `500` | Max records to scan per Mem0 read/list operation |
 | `OUROBOROS_MEM0_QDRANT_URL` | `http://qdrant:6333` | Qdrant endpoint for Mem0 vector storage |
 | `OUROBOROS_MEM0_QDRANT_COLLECTION` | `mem0` | Qdrant collection name for Mem0 records |
-| `OUROBOROS_MEM0_EMBED_MODEL` | `models/text-embedding-004` | Gemini embedding model for Mem0 |
+| `OUROBOROS_MEM0_EMBED_MODEL` | `models/gemini-embedding-001` | Gemini embedding model for Mem0 |
 | `OUROBOROS_MEM0_LLM_MODEL` | `gemini-2.5-flash` | Gemini LLM model for Mem0 infer operations |
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC` | `1800` | Max age (seconds) for `openrouter_limit_remaining` before forced OpenRouter refresh |
+| `OUROBOROS_SELF_EDIT_ONLY` | `false` | Disable any OpenCode CLI fallback and keep `opencode_edit` on internal self-edit path only. In this mode OpenRouter budget is ignored when a non-OpenRouter base URL is used |
 | `OUROBOROS_OPENCODE_AUTO_INSTALL` | `true` | Auto-install OpenCode CLI at runtime when binary is missing |
 | `OUROBOROS_OPENCODE_INSTALL_CMD` | `curl -fsSL https://opencode.ai/install \| bash` | Custom bootstrap command for OpenCode CLI |
 | `OUROBOROS_RUNTIME_EXTRA_PIP` | *(empty)* | Optional pip packages to auto-install on each `safe_restart` (comma-separated) |
@@ -275,6 +278,9 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
 | `OUROBOROS_RUN_SHELL_TIMEOUT_SEC` | `120` | Timeout (seconds) for `run_shell` subprocess |
 | `OUROBOROS_RUN_SHELL_MAX_OUTPUT_BYTES` | `100000` | Max combined stdout/stderr size returned by `run_shell` |
+| `OUROBOROS_FACT_GATE_ENABLED` | `true` | Enables response fact-check gate for concrete claims (commit/files/tests) before sending user reply |
+| `OUROBOROS_FACT_GATE_MAX_FINDINGS` | `6` | Max number of unverified claims listed in guarded response |
+| `OUROBOROS_FACT_GATE_APPEND_ORIGINAL` | `false` | If `true`, append original unverified agent text under the guard warning |
 | `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Legacy fallback list (used when paid/free priority lists are not set) |
 
 ---

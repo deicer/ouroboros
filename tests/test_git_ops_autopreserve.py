@@ -1,6 +1,19 @@
 import subprocess
 
 
+def test_auto_preserve_default_is_disabled(monkeypatch):
+    from supervisor.git_ops import _attempt_auto_preserve_unsynced
+
+    monkeypatch.delenv("OUROBOROS_AUTO_PRESERVE_UNSYNCED", raising=False)
+    info = _attempt_auto_preserve_unsynced(
+        reason="test",
+        repo_state={"current_branch": "ouroboros", "dirty_lines": ["?? a.py"], "unpushed_lines": []},
+    )
+    assert info["enabled"] is False
+    assert info["attempted"] is False
+    assert info["ok"] is False
+
+
 def test_auto_preserve_disabled(monkeypatch):
     from supervisor.git_ops import _attempt_auto_preserve_unsynced
 

@@ -220,9 +220,9 @@ def _attempt_auto_preserve_unsynced(reason: str, repo_state: Dict[str, Any]) -> 
     - Always try to push current branch (also flushes pre-existing unpushed commits).
     - If commit was created but push failed, undo that commit to keep tree unchanged.
 
-    Controlled by env OUROBOROS_AUTO_PRESERVE_UNSYNCED (default: 1).
+    Controlled by env OUROBOROS_AUTO_PRESERVE_UNSYNCED (default: 0).
     """
-    enabled = str(os.environ.get("OUROBOROS_AUTO_PRESERVE_UNSYNCED", "1")).strip().lower() not in {
+    enabled = str(os.environ.get("OUROBOROS_AUTO_PRESERVE_UNSYNCED", "0")).strip().lower() not in {
         "0", "false", "off", "no",
     }
     info: Dict[str, Any] = {

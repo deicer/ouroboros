@@ -105,3 +105,35 @@ def test_relevance_guard_rewrites_repeated_template(monkeypatch, tmp_path):
         drive_logs=drive_root / "logs",
     )
     assert out.startswith("Отвечаю по сути:")
+
+
+def test_emit_task_results_applies_fact_verification_gate(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "drive"
+    repo_dir.mkdir()
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "memory").mkdir(parents=True)
+    (drive_root / "memory" / "identity.md").write_text("# id", encoding="utf-8")
+    (drive_root / "memory" / "scratchpad.md").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    env = Env(repo_dir=repo_dir, drive_root=drive_root)
+    agent = OuroborosAgent(env=env, event_queue=None)
+
+    monkeypatch.setattr(
+        "ouroboros.agent.apply_fact_verification_gate",
+        lambda text, **_: "[FACT_GATE]\n" + text,
+    )
+
+    agent._emit_task_results(
+        task={"id": "t1", "chat_id": 1, "text": "status?"},
+        text="Все изменения зафиксированы в git (commit 52ad6db).",
+        usage={},
+        llm_trace={"tool_calls": []},
+        start_time=0.0,
+        drive_logs=drive_root / "logs",
+    )
+
+    send_events = [e for e in agent._pending_events if e.get("type") == "send_message"]
+    assert send_events
+    assert send_events[-1]["text"].startswith("[FACT_GATE]")

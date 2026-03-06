@@ -241,6 +241,8 @@ def _is_paid_limit_error(error: Exception) -> bool:
         "limit reached",
         "credit balance",
         "out of credits",
+        "key limit exceeded",
+        "total limit",
         "402",
     )
     return any(m in text for m in markers)
@@ -341,8 +343,43 @@ def _loop_guard_hard_stop_allowed(active_model: str) -> bool:
     return True
 
 
+def _loop_guard_hard_stop(active_model: str, *, is_direct_chat: bool = False) -> bool:
+    """
+    Final hard-stop policy for repeated-loop guards.
+
+    In direct chat we default to hard-stop to avoid long recover spirals.
+    """
+    if is_direct_chat and _env_bool("OUROBOROS_LOOP_GUARD_FORCE_STOP_DIRECT_CHAT", default=True):
+        return True
+    return _loop_guard_hard_stop_allowed(active_model)
+
+
 def _loop_guard_free_recovery_limit() -> int:
     return max(1, _env_int("OUROBOROS_LOOP_GUARD_FREE_RECOVERY_LIMIT", 3))
+
+
+def _run_shell_exit_code(result: Any) -> Optional[int]:
+    """Extract run_shell exit code from tool result prefix ('exit_code=N')."""
+    text = str(result or "")
+    if not text.startswith("exit_code="):
+        return None
+    first_line = text.splitlines()[0].strip()
+    raw_code = first_line.split("=", 1)[1].strip() if "=" in first_line else ""
+    try:
+        return int(raw_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_result_is_error(fn_name: str, result: Any) -> bool:
+    """Classify tool results that should be treated as errors."""
+    text = str(result or "")
+    if text.startswith("⚠️"):
+        return True
+    if fn_name == "run_shell":
+        exit_code = _run_shell_exit_code(text)
+        return (exit_code is not None) and (exit_code != 0)
+    return False
 
 
 def _append_thinking_trace(
@@ -431,7 +468,7 @@ def _execute_single_tool(
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
     })
 
-    is_error = (not tool_ok) or str(result).startswith("⚠️")
+    is_error = (not tool_ok) or _tool_result_is_error(fn_name, result)
 
     return {
         "tool_call_id": tool_call_id,
@@ -1442,7 +1479,10 @@ def run_llm_loop(
                 if len(recent_error_sigs) >= repeated_error_window_min:
                     top_sig, top_count = Counter(recent_error_sigs).most_common(1)[0]
                     if top_count >= repeated_error_threshold:
-                        hard_stop = _loop_guard_hard_stop_allowed(active_model)
+                        hard_stop = _loop_guard_hard_stop(
+                            active_model,
+                            is_direct_chat=is_direct_chat,
+                        )
                         if (not hard_stop) and free_error_recoveries < free_guard_recovery_limit:
                             free_error_recoveries += 1
                             recover_msg = (
@@ -1527,7 +1567,10 @@ def run_llm_loop(
                     window_min=repeated_batch_window_min,
                 )
                 if stop:
-                    hard_stop = _loop_guard_hard_stop_allowed(active_model)
+                    hard_stop = _loop_guard_hard_stop(
+                        active_model,
+                        is_direct_chat=is_direct_chat,
+                    )
                     if (not hard_stop) and free_batch_recoveries < free_guard_recovery_limit:
                         free_batch_recoveries += 1
                         recover_msg = (

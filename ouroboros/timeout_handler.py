@@ -35,6 +35,28 @@ def _truncate_tool_result(result: Any) -> str:
     return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
 
 
+def _run_shell_exit_code(result: Any) -> Optional[int]:
+    text = str(result or "")
+    if not text.startswith("exit_code="):
+        return None
+    first_line = text.splitlines()[0].strip()
+    raw_code = first_line.split("=", 1)[1].strip() if "=" in first_line else ""
+    try:
+        return int(raw_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tool_result_is_error(fn_name: str, result: Any) -> bool:
+    text = str(result or "")
+    if text.startswith("⚠️"):
+        return True
+    if fn_name == "run_shell":
+        exit_code = _run_shell_exit_code(text)
+        return (exit_code is not None) and (exit_code != 0)
+    return False
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -244,7 +266,7 @@ def _execute_single_tool(
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
     })
 
-    is_error = (not tool_ok) or str(result).startswith("⚠️")
+    is_error = (not tool_ok) or _tool_result_is_error(fn_name, result)
 
     return {
         "tool_call_id": tool_call_id,

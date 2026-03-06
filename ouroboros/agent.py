@@ -34,6 +34,7 @@ from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
+from ouroboros.response_verification import apply_fact_verification_gate
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +262,9 @@ class OuroborosAgent:
         """Check for uncommitted changes and attempt auto-rescue commit & push."""
         import re
         import subprocess
+        remote_sync_enabled = str(
+            os.environ.get("OUROBOROS_STARTUP_AUTO_RESCUE_PUSH", "0")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         # Remove stale index.lock (race condition when multiple workers start)
         lock_path = self.env.repo_dir / ".git" / "index.lock"
         if lock_path.exists():
@@ -292,34 +296,45 @@ class OuroborosAgent:
                         ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
                         cwd=str(self.env.repo_dir), timeout=30, check=True
                     )
-                    # Validate branch name
-                    if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
-                        raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
-                    # Pull with rebase before push
-                    subprocess.run(
-                        ["git", "pull", "--rebase", "origin", self.env.branch_dev],
-                        cwd=str(self.env.repo_dir), timeout=60, check=True
-                    )
-                    # Push
-                    try:
+                    if remote_sync_enabled:
+                        # Validate branch name only for remote sync operations.
+                        if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
+                            raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
+                        # Pull with rebase before push
                         subprocess.run(
-                            ["git", "push", "origin", self.env.branch_dev],
+                            ["git", "pull", "--rebase", "origin", self.env.branch_dev],
                             cwd=str(self.env.repo_dir), timeout=60, check=True
                         )
+                        # Push
+                        try:
+                            subprocess.run(
+                                ["git", "push", "origin", self.env.branch_dev],
+                                cwd=str(self.env.repo_dir), timeout=60, check=True
+                            )
+                            auto_committed = True
+                            log.warning(
+                                f"Auto-rescued {len(dirty_files)} uncommitted files on startup"
+                            )
+                        except subprocess.CalledProcessError:
+                            # If push fails, undo the commit
+                            subprocess.run(
+                                ["git", "reset", "HEAD~1"],
+                                cwd=str(self.env.repo_dir), timeout=10, check=True
+                            )
+                            raise
+                    else:
                         auto_committed = True
-                        log.warning(f"Auto-rescued {len(dirty_files)} uncommitted files on startup")
-                    except subprocess.CalledProcessError:
-                        # If push fails, undo the commit
-                        subprocess.run(
-                            ["git", "reset", "HEAD~1"],
-                            cwd=str(self.env.repo_dir), timeout=10, check=True
+                        log.warning(
+                            "Auto-rescued %d uncommitted files on startup (local commit only; "
+                            "set OUROBOROS_STARTUP_AUTO_RESCUE_PUSH=1 to enable remote sync)",
+                            len(dirty_files),
                         )
-                        raise
                 except Exception as e:
                     log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
                 return {
                     "status": "warning", "files": dirty_files[:20],
                     "auto_committed": auto_committed,
+                    "remote_sync_enabled": remote_sync_enabled,
                 }, 1
             else:
                 return {"status": "ok"}, 0
@@ -713,6 +728,21 @@ class OuroborosAgent:
         sanitized_for_user = _strip_background_preamble_for_user(text, task)
         user_text, log_text = _split_user_and_log_text(sanitized_for_user)
         user_text = self._apply_response_relevance_guard(user_text, task, usage, drive_logs)
+        fact_checked_text = apply_fact_verification_gate(
+            text=user_text,
+            repo_dir=self.env.repo_dir,
+            llm_trace=llm_trace,
+        )
+        if fact_checked_text != user_text:
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "response_fact_gate_blocked_claims",
+                "task_id": task.get("id"),
+                "chat_id": task.get("chat_id"),
+                "before_preview": truncate_for_log(user_text, 500),
+                "after_preview": truncate_for_log(fact_checked_text, 500),
+            })
+        user_text = fact_checked_text
         # Keep full model output for diagnostics even when user text is sanitized.
         log_text = str(text or "")
         self._pending_events.append({
