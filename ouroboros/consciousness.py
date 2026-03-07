@@ -36,6 +36,7 @@ from ouroboros.llm import (
     get_free_models_from_env,
     should_use_openrouter_budget,
 )
+from ouroboros.bootstrap_env import should_autostart_background_from_env
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,11 @@ class BackgroundConsciousness:
         return get_light_model_from_env()
 
     def start(self) -> str:
+        if not should_autostart_background_from_env():
+            self._running = False
+            self._stop_event.set()
+            self._wakeup_event.set()
+            return "Background consciousness disabled by OUROBOROS_BG_ENABLED."
         if self.is_running:
             return "Background consciousness is already running."
         self._running = True

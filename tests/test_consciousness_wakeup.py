@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from ouroboros.consciousness import _clamp_wakeup_seconds, _default_wakeup_seconds
+from ouroboros.consciousness import (
+    BackgroundConsciousness,
+    _clamp_wakeup_seconds,
+    _default_wakeup_seconds,
+)
 
 
 def test_default_wakeup_is_short_in_local_llm_mode(monkeypatch):
@@ -22,3 +26,23 @@ def test_clamp_wakeup_allows_10_seconds_in_local_mode(monkeypatch):
 def test_clamp_wakeup_keeps_openrouter_minimum(monkeypatch):
     monkeypatch.delenv("OUROBOROS_LLM_BASE_URL", raising=False)
     assert _clamp_wakeup_seconds(10) == 60
+
+
+def test_background_start_is_hard_disabled_by_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OUROBOROS_BG_ENABLED", "false")
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    (drive_root / "logs").mkdir(parents=True)
+    repo_dir.mkdir(parents=True)
+
+    bg = BackgroundConsciousness(
+        drive_root=drive_root,
+        repo_dir=repo_dir,
+        event_queue=None,
+        owner_chat_id_fn=lambda: None,
+    )
+
+    result = bg.start()
+
+    assert "disabled" in result.lower()
+    assert bg.is_running is False
