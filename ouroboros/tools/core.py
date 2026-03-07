@@ -123,7 +123,7 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
-def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
+def _repo_read(
     raw_key = str(path or "").strip().replace("\\", "/")
     mapped_drive_key = _REPO_TO_DRIVE_ALIAS.get(raw_key) or _REPO_TO_DRIVE_ALIAS.get(raw_key.lower())
     if mapped_drive_key:
