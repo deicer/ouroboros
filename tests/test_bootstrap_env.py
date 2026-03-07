@@ -17,3 +17,9 @@ def test_launcher_no_longer_imports_llm_budget_helper():
     launcher_src = Path("/home/deicer/ouroboros/launcher.py").read_text(encoding="utf-8")
     assert "from ouroboros.llm import should_use_openrouter_budget" not in launcher_src
     assert "from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env" in launcher_src
+
+
+def test_state_no_longer_imports_llm_budget_helper():
+    state_src = Path("/home/deicer/ouroboros/supervisor/state.py").read_text(encoding="utf-8")
+    assert "from ouroboros.llm import should_use_openrouter_budget" not in state_src
+    assert "from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env" in state_src

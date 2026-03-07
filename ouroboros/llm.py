@@ -48,7 +48,7 @@ def get_llm_base_url() -> str:
 def _is_local_base_url(base_url: str) -> bool:
     parsed = urlparse(str(base_url or "").strip())
     host = (parsed.hostname or "").strip().lower()
-    return host in {"127.0.0.1", "localhost", "::1"}
+    return host in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
 
 
 def get_llm_api_key() -> str:

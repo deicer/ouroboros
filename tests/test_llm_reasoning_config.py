@@ -44,6 +44,12 @@ def test_local_llm_reasoning_omits_openrouter_only_exclude(monkeypatch):
     assert cfg == {"effort": "medium"}
 
 
+def test_host_docker_internal_reasoning_omits_openrouter_only_exclude(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://host.docker.internal:3455/v1")
+    cfg = build_reasoning_config("gpt-5.1-codex-mini", reasoning_effort="medium")
+    assert cfg == {"effort": "medium"}
+
+
 def test_is_free_model_heuristics():
     assert is_free_model("arcee-ai/trinity-large-preview:free") is True
     assert is_free_model("opencode/minimax-m2.5-free") is True
@@ -140,6 +146,15 @@ def test_local_llm_base_url_and_dummy_key(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     assert get_llm_base_url() == "http://127.0.0.1:2455/v1"
+    assert get_llm_api_key() == "dummy"
+    assert should_use_openrouter_budget() is False
+
+
+def test_host_docker_internal_uses_dummy_key_in_local_mode(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://host.docker.internal:3455/v1")
+    monkeypatch.delenv("OUROBOROS_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
     assert get_llm_api_key() == "dummy"
     assert should_use_openrouter_budget() is False
 
