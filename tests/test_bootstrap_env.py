@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env
+from ouroboros.bootstrap_env import (
+    should_autostart_background_from_env,
+    should_use_openrouter_budget_from_env,
+)
 
 
 def test_bootstrap_env_detects_local_base_url(monkeypatch):
@@ -13,13 +16,30 @@ def test_bootstrap_env_defaults_to_openrouter_when_unset(monkeypatch):
     assert should_use_openrouter_budget_from_env() is True
 
 
+def test_background_autostart_defaults_to_on(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_BG_ENABLED", raising=False)
+    assert should_autostart_background_from_env() is True
+
+
+def test_background_autostart_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_BG_ENABLED", "false")
+    assert should_autostart_background_from_env() is False
+
+
 def test_launcher_no_longer_imports_llm_budget_helper():
     launcher_src = Path("/home/deicer/ouroboros/launcher.py").read_text(encoding="utf-8")
     assert "from ouroboros.llm import should_use_openrouter_budget" not in launcher_src
-    assert "from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env" in launcher_src
+    assert "from ouroboros.bootstrap_env import" in launcher_src
+    assert "should_use_openrouter_budget_from_env" in launcher_src
 
 
 def test_state_no_longer_imports_llm_budget_helper():
     state_src = Path("/home/deicer/ouroboros/supervisor/state.py").read_text(encoding="utf-8")
     assert "from ouroboros.llm import should_use_openrouter_budget" not in state_src
     assert "from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env" in state_src
+
+
+def test_launcher_has_background_autostart_guard():
+    launcher_src = Path("/home/deicer/ouroboros/launcher.py").read_text(encoding="utf-8")
+    assert "should_autostart_background_from_env" in launcher_src
+    assert 'os.environ.get("OUROBOROS_BG_ENABLED"' not in launcher_src

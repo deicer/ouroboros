@@ -17,7 +17,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ouroboros.apply_patch import install as install_apply_patch
-from ouroboros.bootstrap_env import should_use_openrouter_budget_from_env
+from ouroboros.bootstrap_env import (
+    should_autostart_background_from_env,
+    should_use_openrouter_budget_from_env,
+)
 install_apply_patch()
 
 # ----------------------------
@@ -634,8 +637,11 @@ def _maybe_send_busy_ack(chat_id: int) -> None:
 
 # Auto-start background consciousness (default: always on)
 try:
-    _consciousness.start()
-    log.info("\U0001f9e0 Background consciousness auto-started (default: always on)")
+    if should_autostart_background_from_env():
+        _consciousness.start()
+        log.info("\U0001f9e0 Background consciousness auto-started")
+    else:
+        log.info("\U0001f9e0 Background consciousness auto-start disabled by OUROBOROS_BG_ENABLED")
 except Exception as e:
     log.warning("consciousness auto-start failed: %s", e)
 
