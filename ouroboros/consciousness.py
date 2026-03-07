@@ -453,7 +453,7 @@ class BackgroundConsciousness:
         if fn_name not in self._BG_TOOL_WHITELIST:
             return f"Tool {fn_name} not available in background mode."
         try:
-            args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+            args = parse_tool_call_arguments(tc.get("function", {}).get("arguments"))
         except (json.JSONDecodeError, ValueError):
             return "Failed to parse arguments."
 
@@ -554,3 +554,4 @@ class BackgroundConsciousness:
             )
         except Exception as e:
             log.warning("Failed to check arch review schedule: %s", e)
+from ouroboros.tool_args import parse_tool_call_arguments

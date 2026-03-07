@@ -30,6 +30,7 @@ from ouroboros.llm import (
     is_free_model,
     normalize_reasoning_effort,
 )
+from ouroboros.tool_args import parse_tool_call_arguments
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.utils import (
     append_jsonl,
@@ -444,7 +445,7 @@ def _execute_single_tool(
 
     # Parse arguments
     try:
-        args = json.loads(tc["function"]["arguments"] or "{}")
+        args = parse_tool_call_arguments(tc["function"].get("arguments"))
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
         return {
@@ -541,7 +542,7 @@ def _make_timeout_result(
     """
     args_for_log = {}
     try:
-        args = json.loads(tc["function"]["arguments"] or "{}")
+        args = parse_tool_call_arguments(tc["function"].get("arguments"))
         args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
     except Exception:
         pass

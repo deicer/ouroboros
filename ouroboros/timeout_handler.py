@@ -132,7 +132,7 @@ def _make_timeout_result(
     """
     args_for_log = {}
     try:
-        args = json.loads(tc["function"]["arguments"] or "{}")
+        args = parse_tool_call_arguments(tc["function"].get("arguments"))
         args_for_log = {k: v for k, v in args.items() if isinstance(v, (str, int, float, bool, list, dict))}
     except Exception:
         pass
@@ -231,7 +231,7 @@ def _execute_single_tool(
 
     # Parse arguments
     try:
-        args = json.loads(tc["function"]["arguments"] or "{}")
+        args = parse_tool_call_arguments(tc["function"].get("arguments"))
     except (json.JSONDecodeError, ValueError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{fn_name}': {e}"
         return {
@@ -276,3 +276,4 @@ def _execute_single_tool(
         "args_for_log": args_for_log,
         "is_code_tool": is_code_tool,
     }
+from ouroboros.tool_args import parse_tool_call_arguments
