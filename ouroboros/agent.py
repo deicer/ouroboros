@@ -58,6 +58,23 @@ _STATUS_TEMPLATE_MARKERS = (
     "## рефлексия",
     "## статус",
 )
+_RAW_CURSOR_PAYLOAD_KEYS = frozenset({"id", "cursor", "loc"})
+_INTERNAL_DRAFT_MARKERS = (
+    "let's stop.",
+    "need to inspect",
+    "we need to",
+    "then we need to",
+    "use run_shell",
+    "repo_read",
+    "repo_list",
+    "run_shell",
+    "sed -n",
+    "grep -n",
+    "after we get output",
+    "developer message",
+    "tool call",
+    "plan tests",
+)
 _FOCUS_STOPWORDS = {
     "что", "где", "когда", "почему", "как", "зачем", "или", "это", "этот", "эта", "эти",
     "уже", "еще", "ещё", "тут", "там", "мне", "тебя", "твой", "мою", "мой", "моих",
@@ -74,6 +91,47 @@ def _split_user_and_log_text(text: str) -> Tuple[str, str]:
     if any(marker in low for marker in _LOOP_GUARD_EN_MARKERS):
         return _LOOP_GUARD_USER_TEXT_RU, raw_text
     return raw_text, raw_text
+
+
+def _looks_like_raw_cursor_payload(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw.startswith("{") or not raw.endswith("}"):
+        return False
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return set(str(k) for k in payload.keys()) == _RAW_CURSOR_PAYLOAD_KEYS
+
+
+def _looks_like_internal_draft(text: str) -> bool:
+    raw = str(text or "")
+    low = raw.lower()
+    if len(raw) < 180:
+        return False
+    marker_hits = sum(1 for marker in _INTERNAL_DRAFT_MARKERS if marker in low)
+    if marker_hits >= 3:
+        return True
+    if "the last assistant message was empty" in low and "use run_shell" in low:
+        return True
+    return False
+
+
+def _sanitize_user_reply_for_delivery(text: str) -> str:
+    raw = str(text or "")
+    if _looks_like_raw_cursor_payload(raw):
+        return (
+            "⚠️ Отфильтровал служебный payload вместо ответа. "
+            "Продолжаю задачу и вернусь с нормальным текстовым статусом."
+        )
+    if _looks_like_internal_draft(raw):
+        return (
+            "⚠️ Отфильтровал внутренний рабочий черновик. "
+            "Продолжаю задачу и пришлю только короткий итог по делу."
+        )
+    return raw
 
 
 def _is_auto_resume_task(task: Optional[Dict[str, Any]]) -> bool:
@@ -727,6 +785,7 @@ class OuroborosAgent:
 
         sanitized_for_user = _strip_background_preamble_for_user(text, task)
         user_text, log_text = _split_user_and_log_text(sanitized_for_user)
+        user_text = _sanitize_user_reply_for_delivery(user_text)
         user_text = self._apply_response_relevance_guard(user_text, task, usage, drive_logs)
         fact_checked_text = apply_fact_verification_gate(
             text=user_text,

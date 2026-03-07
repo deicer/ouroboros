@@ -5,6 +5,7 @@ from ouroboros.agent import (
     OuroborosAgent,
     _is_status_template_reply,
     _response_focus_overlap_ratio,
+    _sanitize_user_reply_for_delivery,
     _split_user_and_log_text,
     _strip_background_preamble_for_user,
     _text_similarity,
@@ -137,3 +138,55 @@ def test_emit_task_results_applies_fact_verification_gate(monkeypatch, tmp_path)
     send_events = [e for e in agent._pending_events if e.get("type") == "send_message"]
     assert send_events
     assert send_events[-1]["text"].startswith("[FACT_GATE]")
+
+
+def test_sanitize_user_reply_for_delivery_blocks_raw_cursor_json():
+    out = _sanitize_user_reply_for_delivery('{"id":"0f2a6d5c","cursor":"0","loc":0}')
+    assert "служебный payload" in out.lower()
+    assert "cursor" not in out
+
+
+def test_sanitize_user_reply_for_delivery_blocks_internal_draft():
+    source = (
+        "Let's stop. The last assistant message was empty.\n"
+        "Need to inspect owner interrupt handling.\n"
+        "Use run_shell to grep owner_interrupt.\n"
+        "Then we need to plan tests in tests/test_loop_guards.py.\n"
+        "After we get output, we proceed.\n"
+        "Use repo_read for loop.py and run_shell for sed -n.\n"
+    )
+    out = _sanitize_user_reply_for_delivery(source)
+    assert "внутренний рабочий черновик" in out.lower()
+    assert "run_shell" not in out
+
+
+def test_emit_task_results_sanitizes_raw_json_payload(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "drive"
+    repo_dir.mkdir()
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "memory").mkdir(parents=True)
+    (drive_root / "memory" / "identity.md").write_text("# id", encoding="utf-8")
+    (drive_root / "memory" / "scratchpad.md").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    env = Env(repo_dir=repo_dir, drive_root=drive_root)
+    agent = OuroborosAgent(env=env, event_queue=None)
+
+    monkeypatch.setattr(
+        "ouroboros.agent.apply_fact_verification_gate",
+        lambda text, **_: text,
+    )
+
+    agent._emit_task_results(
+        task={"id": "t2", "chat_id": 1, "text": "status?"},
+        text='{"id":"0f2a6d5c","cursor":"0","loc":0}',
+        usage={},
+        llm_trace={"tool_calls": []},
+        start_time=0.0,
+        drive_logs=drive_root / "logs",
+    )
+
+    send_events = [e for e in agent._pending_events if e.get("type") == "send_message"]
+    assert send_events
+    assert "служебный payload" in send_events[-1]["text"].lower()

@@ -34,9 +34,19 @@ from ouroboros.llm import (
     LLMClient,
     get_light_model_from_env,
     get_free_models_from_env,
+    should_use_openrouter_budget,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _default_wakeup_seconds() -> int:
+    return 300 if should_use_openrouter_budget() else 10
+
+
+def _clamp_wakeup_seconds(seconds: int) -> int:
+    min_seconds = 60 if should_use_openrouter_budget() else 10
+    return max(min_seconds, min(3600, int(seconds)))
 
 
 class BackgroundConsciousness:
@@ -63,7 +73,7 @@ class BackgroundConsciousness:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
-        self._next_wakeup_sec: float = 300.0
+        self._next_wakeup_sec: float = float(_default_wakeup_seconds())
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
 
@@ -424,17 +434,20 @@ class BackgroundConsciousness:
         registry = ToolRegistry(repo_dir=self._repo_dir, drive_root=self._drive_root)
 
         # Register consciousness-specific tool (modifies self._next_wakeup_sec)
-        def _set_next_wakeup(ctx: Any, seconds: int = 300) -> str:
-            self._next_wakeup_sec = max(60, min(3600, int(seconds)))
+        default_seconds = _default_wakeup_seconds()
+        min_seconds = 60 if should_use_openrouter_budget() else 10
+
+        def _set_next_wakeup(ctx: Any, seconds: int = default_seconds) -> str:
+            self._next_wakeup_sec = _clamp_wakeup_seconds(seconds)
             return f"OK: next wakeup in {self._next_wakeup_sec}s"
 
         registry.register(ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup",
             "description": "Set how many seconds until your next thinking cycle. "
-                           "Default 300. Range: 60-3600.",
+                           f"Default {default_seconds}. Range: {min_seconds}-3600.",
             "parameters": {"type": "object", "properties": {
                 "seconds": {"type": "integer",
-                            "description": "Seconds until next wakeup (60-3600)"},
+                            "description": f"Seconds until next wakeup ({min_seconds}-3600)"},
             }, "required": ["seconds"]},
         }, _set_next_wakeup))
 
