@@ -5,6 +5,8 @@ services:
     cpus: 1.0
     mem_limit: 2g
     env_file: .env
+    environment:
+      OUROBOROS_BOOTSTRAP_GIT_RESET: "0"
     depends_on:
       - qdrant
     ports:

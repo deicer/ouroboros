@@ -42,12 +42,22 @@ log = logging.getLogger(__name__)
 
 
 def _default_wakeup_seconds() -> int:
-    return 300 if should_use_openrouter_budget() else 10
+    return 300 if should_use_openrouter_budget() else 120
 
 
 def _clamp_wakeup_seconds(seconds: int) -> int:
-    min_seconds = 60 if should_use_openrouter_budget() else 10
+    min_seconds = 60 if should_use_openrouter_budget() else 120
     return max(min_seconds, min(3600, int(seconds)))
+
+
+def _runtime_operating_policy() -> str:
+    return (
+        "- Owner tasks outrank background work.\n"
+        "- If there is no active owner task, choose exactly ONE concrete self-improvement target for this wakeup.\n"
+        "- Prefer recent failures, logs, and unfinished improvements over broad context rereads.\n"
+        "- Do not reread the same file path without a new hypothesis, tool action, or mutation.\n"
+        "- If you cannot name a concrete next action within 2 rounds, schedule one self-improvement task or increase the wakeup interval."
+    )
 
 
 class BackgroundConsciousness:
@@ -348,6 +358,7 @@ class BackgroundConsciousness:
 
     def _build_context(self) -> str:
         parts = [self._load_bg_prompt()]
+        parts.append("## Operating policy\n\n" + _runtime_operating_policy())
 
         # Bible (abbreviated)
         bible_path = self._repo_dir / "BIBLE.md"

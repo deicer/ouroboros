@@ -9,7 +9,7 @@ from ouroboros.consciousness import (
 
 def test_default_wakeup_is_short_in_local_llm_mode(monkeypatch):
     monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://host.docker.internal:3455/v1")
-    assert _default_wakeup_seconds() == 10
+    assert _default_wakeup_seconds() == 120
 
 
 def test_default_wakeup_stays_300_for_openrouter(monkeypatch):
@@ -17,10 +17,10 @@ def test_default_wakeup_stays_300_for_openrouter(monkeypatch):
     assert _default_wakeup_seconds() == 300
 
 
-def test_clamp_wakeup_allows_10_seconds_in_local_mode(monkeypatch):
+def test_clamp_wakeup_allows_120_seconds_in_local_mode(monkeypatch):
     monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://127.0.0.1:3455/v1")
-    assert _clamp_wakeup_seconds(3) == 10
-    assert _clamp_wakeup_seconds(10) == 10
+    assert _clamp_wakeup_seconds(3) == 120
+    assert _clamp_wakeup_seconds(120) == 120
 
 
 def test_clamp_wakeup_keeps_openrouter_minimum(monkeypatch):
@@ -46,3 +46,24 @@ def test_background_start_is_hard_disabled_by_env(monkeypatch, tmp_path):
 
     assert "disabled" in result.lower()
     assert bg.is_running is False
+
+
+def test_background_context_includes_idle_self_improvement_policy(tmp_path):
+    drive_root = tmp_path / "drive"
+    repo_dir = tmp_path / "repo"
+    (drive_root / "logs").mkdir(parents=True)
+    (repo_dir / "prompts").mkdir(parents=True)
+    (repo_dir / "prompts" / "CONSCIOUSNESS.md").write_text("Base prompt.", encoding="utf-8")
+
+    bg = BackgroundConsciousness(
+        drive_root=drive_root,
+        repo_dir=repo_dir,
+        event_queue=None,
+        owner_chat_id_fn=lambda: None,
+    )
+
+    context = bg._build_context()
+
+    assert "Owner tasks outrank background work." in context
+    assert "If there is no active owner task" in context
+    assert "Do not reread the same file path" in context

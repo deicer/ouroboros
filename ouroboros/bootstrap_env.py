@@ -21,3 +21,8 @@ def should_use_openrouter_budget_from_env() -> bool:
 def should_autostart_background_from_env() -> bool:
     raw = str(os.environ.get("OUROBOROS_BG_ENABLED", "1") or "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def should_bootstrap_git_reset_from_env() -> bool:
+    raw = str(os.environ.get("OUROBOROS_BOOTSTRAP_GIT_RESET", "1") or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
