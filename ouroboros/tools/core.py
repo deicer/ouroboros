@@ -135,7 +135,7 @@ def _slice_repo_read_text(text: str, offset: int = 0, limit: int = 0, tail: int 
         try:
             file_path = _resolve_read_path(ctx.repo_dir, path)
         except Exception as e:
-            return f"⚠️ PATH_ERROR: {e}"
+            
 
     if file_path.is_dir():
         rel = file_path.relative_to(ctx.repo_dir) if file_path != ctx.repo_dir else pathlib.Path(".")
