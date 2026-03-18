@@ -702,6 +702,10 @@ def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
             reasoning_effort="low",
             max_tokens=1024,
         )
+        # Log compaction cost (not tracked in task accumulated_usage)
+        compaction_cost = float((_usage or {}).get("cost") or 0)
+        if compaction_cost > 0:
+            log.info("LLM compaction cost: $%.4f (model=%s)", compaction_cost, light_model)
         summary_text = resp_msg.get("content") or ""
         if not summary_text.strip():
             raise ValueError("empty summary response")

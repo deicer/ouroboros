@@ -95,15 +95,14 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if task_type == "evolution":
         st = ctx.load_state()
         # Check if task produced meaningful output (successful evolution)
-        # A successful evolution should have:
-        # - Reasonable cost (not near-zero, indicating actual work)
-        # - Multiple rounds (not just 1 retry)
+        # Empty/broken responses typically have 0-1 rounds and near-zero cost.
+        # Real work involves multiple LLM rounds (tool calls, code edits, etc).
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
 
-        # Heuristic: if cost > $0.10 and rounds >= 1, consider it successful
-        # Empty responses typically cost < $0.01 and have 0-1 rounds
-        if cost > 0.10 and rounds >= 1:
+        # Success = multiple rounds of real work (>= 3 rounds indicates tool use)
+        # OR moderate cost even with fewer rounds (single expensive reasoning step)
+        if rounds >= 3 or (cost > 0.05 and rounds >= 1):
             # Success: reset failure counter
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)

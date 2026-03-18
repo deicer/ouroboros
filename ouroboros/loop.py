@@ -11,11 +11,17 @@ import json
 import os
 import pathlib
 import queue
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
+
+try:
+    from openai import AuthenticationError as _OAIAuthError, RateLimitError as _OAIRateLimitError
+except ImportError:
+    _OAIAuthError = _OAIRateLimitError = None
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage, estimate_cost
 from ouroboros.tools.registry import ToolRegistry
@@ -801,7 +807,7 @@ def _call_llm_with_retry(
                 })
 
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt + random.uniform(0, 1))
                     continue
                 # Last attempt — return None to trigger "could not get response"
                 return None, cost
@@ -831,9 +837,21 @@ def _call_llm_with_retry(
                 "task_id": task_id,
                 "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
+                "error_type": type(e).__name__,
             })
+            # Classify errors for appropriate backoff
+            if _OAIAuthError and isinstance(e, _OAIAuthError):
+                log.error("LLM auth error (not retryable): %s", e)
+                break  # Don't retry auth errors
+            if _OAIRateLimitError and isinstance(e, _OAIRateLimitError):
+                if attempt < max_retries - 1:
+                    delay = 30 + random.uniform(0, 10)
+                    log.warning("LLM rate limit, backing off %.1fs", delay)
+                    time.sleep(delay)
+                continue
+            # Default backoff for network/server errors
             if attempt < max_retries - 1:
-                time.sleep(min(2 ** attempt * 2, 30))
+                time.sleep(min(2 ** attempt * 2, 30) + random.uniform(0, 2))
 
     return None, 0.0
 
