@@ -34,8 +34,8 @@ DRIVE_ROOT: pathlib.Path = pathlib.Path(os.environ.get("DRIVE_ROOT", "/data"))
 MAX_WORKERS: int = 5
 SOFT_TIMEOUT_SEC: int = 600
 HARD_TIMEOUT_SEC: int = 1800
-BRANCH_DEV: str = "ouroboros"
-BRANCH_STABLE: str = "ouroboros-stable"
+BRANCH_DEV: str = ""
+BRANCH_STABLE: str = ""
 
 _CTX = None
 _LAST_SPAWN_TIME: float = 0.0  # grace period: don't count dead workers right after spawn
@@ -60,7 +60,7 @@ def _get_ctx():
 
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, max_workers: int,
          soft_timeout: int, hard_timeout: int,
-         branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable",
+         branch_dev: str, branch_stable: str,
          **_kwargs) -> None:
     global REPO_DIR, DRIVE_ROOT, MAX_WORKERS, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
     global BRANCH_DEV, BRANCH_STABLE
