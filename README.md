@@ -115,7 +115,7 @@ Check logs: `docker compose logs -f`
 
 Open your Telegram bot and send any message. The first person to write becomes the **owner**. All messages from other users are ignored.
 
-You should see: `Owner registered. Ouroboros online.`
+Ouroboros will check its subsystems and introduce itself.
 
 ### Operations
 

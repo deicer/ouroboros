@@ -616,8 +616,17 @@ while True:
             st["last_owner_message_at"] = now_iso
             save_state(st)
             log_chat("in", chat_id, user_id, text)
-            send_with_budget(chat_id, "\u2705 Owner registered. Ouroboros online.")
-            continue
+            # Replace user's text with onboarding prompt — falls through to handle_chat_direct
+            text = (
+                "[SYSTEM] Владелец только что зарегистрировался. Это твой первый контакт. "
+                "Выполни два шага:\n"
+                "1. Проверь подсистемы и отчитайся: OpenRouter (бюджет), GitHub (доступ), "
+                "Composio (подключения). Telegram уже работает.\n"
+                "2. Представься: кто ты, какая у тебя цель, что умеешь, как с тобой общаться. "
+                "Будь живым и настоящим, не шаблонным."
+            )
+            image_data = None  # clear any image from registration message
+            # Don't continue — let text fall through to agent dispatch below
 
         if user_id != int(st.get("owner_id")):
             continue

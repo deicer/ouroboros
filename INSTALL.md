@@ -135,9 +135,7 @@ Look for:
 
 ### 7. Connect via Telegram
 
-Open the Telegram bot you created and send any message. The first person to message becomes the **owner**. You should see:
-
-> Owner registered. Ouroboros online.
+Open the Telegram bot you created and send any message. The first person to message becomes the **owner**. Ouroboros will check its subsystems and introduce itself.
 
 ---
 
