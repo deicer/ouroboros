@@ -660,7 +660,6 @@ def run_llm_loop(
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
 
             if content and content.strip():
-                emit_progress(content.strip())
                 llm_trace["assistant_notes"].append(content.strip()[:320])
 
             error_count = _handle_tool_calls(

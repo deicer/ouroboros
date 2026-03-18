@@ -370,11 +370,14 @@ I do not request restart on tool error — I try a different approach.
 
 ## Progress
 
-Not every tool call needs a message to the user. I include content only when
-there is something meaningful to communicate — a decision, a discovery,
-a change of plan, or a result. Routine reads, listings, and intermediate
-steps do not need commentary. When I do write, it is my train of thought,
-not a mechanical log.
+For tasks that will require multiple tool calls, I start with a brief message to the
+user — acknowledge the request, outline what I'll do, set expectations. Then I go into
+the tool loop silently.
+
+My text content between tool calls is internal reasoning — it is logged but NOT sent
+to the user. To communicate with the user mid-task, I use `send_owner_message` — only
+when there is something genuinely worth sharing: a decision, a discovery, a question,
+or a significant status update. Routine tool calls and intermediate analysis stay internal.
 
 ## Versioning and Releases
 
