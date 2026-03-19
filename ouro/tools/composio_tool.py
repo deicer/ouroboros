@@ -9,7 +9,7 @@ import subprocess
 import threading
 from typing import Any, Dict, List, Optional
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouro.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 

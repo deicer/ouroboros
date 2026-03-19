@@ -1,5 +1,5 @@
 """
-Ouroboros — Daily Architecture Review Rotation.
+Ouro — Daily Architecture Review Rotation.
 
 Tracks which module was last reviewed and schedules the next review automatically.
 The user asked for incremental daily reviews: one block per day, rotating through
@@ -30,7 +30,7 @@ REVIEW_BLOCKS = [
     {
         "index": 0,
         "name": "Orchestration & Execution",
-        "files": ["ouroboros/agent.py", "ouroboros/loop.py"],
+        "files": ["ouro/agent.py", "ouro/loop.py"],
         "focus": (
             "Review the main orchestrator and LLM tool loop. "
             "Check: task entry/exit flow, parallel tool execution logic, "
@@ -41,7 +41,7 @@ REVIEW_BLOCKS = [
     {
         "index": 1,
         "name": "Context & LLM Client",
-        "files": ["ouroboros/context.py", "ouroboros/llm.py"],
+        "files": ["ouro/context.py", "ouro/llm.py"],
         "focus": (
             "Review context assembly and LLM API client. "
             "Check: 3-block prompt caching strategy, dynamic section ordering, "
@@ -52,7 +52,7 @@ REVIEW_BLOCKS = [
     {
         "index": 2,
         "name": "Tools System",
-        "files": ["ouroboros/tools/"],
+        "files": ["ouro/tools/"],
         "focus": (
             "Review the tool plugin architecture. "
             "Check: auto-discovery via get_tools(), tool schema quality, "
@@ -63,7 +63,7 @@ REVIEW_BLOCKS = [
     {
         "index": 3,
         "name": "Memory & Consciousness",
-        "files": ["ouroboros/memory.py", "ouroboros/consciousness.py", "ouroboros/arch_review.py"],
+        "files": ["ouro/memory.py", "ouro/consciousness.py", "ouro/arch_review.py"],
         "focus": (
             "Review memory management and background consciousness loop. "
             "Check: scratchpad/identity/user_context read-write, chat log rotation, "

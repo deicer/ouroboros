@@ -1,5 +1,5 @@
 """
-Ouroboros agent core — thin orchestrator.
+Ouro agent core — thin orchestrator.
 
 Delegates to: loop.py (LLM tool loop), tools/ (tool schemas/execution),
 llm.py (LLM calls), memory.py (scratchpad/identity),
@@ -21,17 +21,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
-from ouroboros.utils import (
+from ouro.utils import (
     utc_now_iso, read_text, append_jsonl,
     safe_relpath, truncate_for_log,
     get_git_info, sanitize_task_for_event, get_budget_remaining,
 )
-from ouroboros.llm import LLMClient, add_usage
-from ouroboros.tools import ToolRegistry
-from ouroboros.tools.registry import ToolContext
-from ouroboros.memory import Memory
-from ouroboros.context import build_llm_messages
-from ouroboros.loop import run_llm_loop
+from ouro.llm import LLMClient, add_usage
+from ouro.tools import ToolRegistry
+from ouro.tools.registry import ToolContext
+from ouro.memory import Memory
+from ouro.context import build_llm_messages
+from ouro.loop import run_llm_loop
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ _worker_boot_lock = threading.Lock()
 class Env:
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
-    branch_dev: str = field(default_factory=lambda: os.environ["OUROBOROS_BRANCH_PREFIX"])
+    branch_dev: str = field(default_factory=lambda: os.environ["OURO_BRANCH_PREFIX"])
 
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
@@ -62,7 +62,7 @@ class Env:
 # Agent
 # ---------------------------------------------------------------------------
 
-class OuroborosAgent:
+class OuroAgent:
     """One agent instance per worker process. Mostly stateless; long-term state lives on Drive."""
 
     def __init__(self, env: Env, event_queue: Any = None):
@@ -435,7 +435,7 @@ class OuroborosAgent:
             self._busy = False
             # Clean up browser if it was used during this task
             try:
-                from ouroboros.tools.browser import cleanup_browser
+                from ouro.tools.browser import cleanup_browser
                 cleanup_browser(self.tools._ctx)
             except Exception:
                 log.debug("Failed to cleanup browser", exc_info=True)
@@ -548,7 +548,7 @@ class OuroborosAgent:
     def _build_review_context(self) -> str:
         """Collect code snapshot + complexity metrics for review tasks."""
         try:
-            from ouroboros.review import collect_sections, compute_complexity_metrics, format_metrics
+            from ouro.review import collect_sections, compute_complexity_metrics, format_metrics
             sections, stats = collect_sections(self.env.repo_dir, self.env.drive_root)
             metrics = compute_complexity_metrics(sections)
 
@@ -638,6 +638,6 @@ class OuroborosAgent:
 # Factory
 # ---------------------------------------------------------------------------
 
-def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
+def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroAgent:
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
-    return OuroborosAgent(env, event_queue=event_queue)
+    return OuroAgent(env, event_queue=event_queue)

@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
-REPO_DIR: pathlib.Path = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "/app"))
+REPO_DIR: pathlib.Path = pathlib.Path(os.environ.get("OURO_REPO_DIR", "/app"))
 DRIVE_ROOT: pathlib.Path = pathlib.Path(os.environ.get("DRIVE_ROOT", "/data"))
 REMOTE_URL: str = ""
 BRANCH_DEV: str = ""
@@ -63,8 +63,8 @@ def ensure_repo_present() -> None:
     else:
         subprocess.run(["git", "remote", "set-url", "origin", REMOTE_URL],
                         cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "config", "user.name", "Ouroboros"], cwd=str(REPO_DIR), check=True)
-    subprocess.run(["git", "config", "user.email", "ouroboros@users.noreply.github.com"],
+    subprocess.run(["git", "config", "user.name", "Ouro"], cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "config", "user.email", "ouro@users.noreply.github.com"],
                     cwd=str(REPO_DIR), check=True)
     subprocess.run(["git", "fetch", "origin"], cwd=str(REPO_DIR), check=True)
 
@@ -367,7 +367,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
 
 def import_test() -> Dict[str, Any]:
     r = subprocess.run(
-        ["python3", "-c", "import ouroboros, ouroboros.agent; print('import_ok')"],
+        ["python3", "-c", "import ouro, ouro.agent; print('import_ok')"],
         cwd=str(REPO_DIR),
         capture_output=True, text=True,
     )
@@ -445,7 +445,7 @@ def safe_restart(
             return True, f"OK: fell back to tag {latest_tag}"
         return False, f"Tag {latest_tag} also failed import"
 
-    # No stable tag found — try legacy ouroboros-stable branch
+    # No stable tag found — try legacy ouro-stable branch
     ok_s, err_s = checkout_and_reset(
         BRANCH_STABLE,
         reason=f"{reason}_fallback_stable",

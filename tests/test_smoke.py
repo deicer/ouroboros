@@ -1,4 +1,4 @@
-"""Smoke test suite for Ouroboros.
+"""Smoke test suite for Ouro.
 
 Tests core invariants:
 - All modules import cleanly
@@ -24,25 +24,25 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # ── Module imports ───────────────────────────────────────────────
 
 CORE_MODULES = [
-    "ouroboros.agent",
-    "ouroboros.context",
-    "ouroboros.loop",
-    "ouroboros.llm",
-    "ouroboros.memory",
-    "ouroboros.review",
-    "ouroboros.utils",
-    "ouroboros.consciousness",
+    "ouro.agent",
+    "ouro.context",
+    "ouro.loop",
+    "ouro.llm",
+    "ouro.memory",
+    "ouro.review",
+    "ouro.utils",
+    "ouro.consciousness",
 ]
 
 TOOL_MODULES = [
-    "ouroboros.tools.registry",
-    "ouroboros.tools.core",
-    "ouroboros.tools.git",
-    "ouroboros.tools.shell",
-    "ouroboros.tools.search",
-    "ouroboros.tools.control",
-    "ouroboros.tools.browser",
-    "ouroboros.tools.review",
+    "ouro.tools.registry",
+    "ouro.tools.core",
+    "ouro.tools.git",
+    "ouro.tools.shell",
+    "ouro.tools.search",
+    "ouro.tools.control",
+    "ouro.tools.browser",
+    "ouro.tools.review",
 ]
 
 SUPERVISOR_MODULES = [
@@ -65,7 +65,7 @@ def test_import(module):
 
 @pytest.fixture
 def registry():
-    from ouroboros.tools.registry import ToolRegistry
+    from ouro.tools.registry import ToolRegistry
     tmp = pathlib.Path(tempfile.mkdtemp())
     return ToolRegistry(repo_dir=tmp, drive_root=tmp)
 
@@ -158,26 +158,26 @@ def test_tool_execute_basic(registry):
 # ── Utilities ────────────────────────────────────────────────────
 
 def test_safe_relpath_normal():
-    from ouroboros.utils import safe_relpath
+    from ouro.utils import safe_relpath
     result = safe_relpath("foo/bar.py")
     assert result == "foo/bar.py"
 
 
 def test_safe_relpath_rejects_traversal():
-    from ouroboros.utils import safe_relpath
+    from ouro.utils import safe_relpath
     with pytest.raises(ValueError):
         safe_relpath("../../../etc/passwd")
 
 
 def test_safe_relpath_strips_leading_slash():
     """safe_relpath strips leading / but doesn't raise."""
-    from ouroboros.utils import safe_relpath
+    from ouro.utils import safe_relpath
     result = safe_relpath("/etc/passwd")
     assert not result.startswith("/")
 
 
 def test_clip_text():
-    from ouroboros.utils import clip_text
+    from ouro.utils import clip_text
 
     # Test 1: Long text gets clipped (max_chars=500)
     long_text = "hello world " * 100  # ~1200 chars
@@ -193,7 +193,7 @@ def test_clip_text():
 
 
 def test_estimate_tokens():
-    from ouroboros.utils import estimate_tokens
+    from ouro.utils import estimate_tokens
     tokens = estimate_tokens("Hello world, this is a test.")
     assert 5 <= tokens <= 20
 
@@ -202,7 +202,7 @@ def test_estimate_tokens():
 
 def test_memory_scratchpad():
     """Memory reads/writes scratchpad without crash."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     with tempfile.TemporaryDirectory() as tmp:
         mem = Memory(drive_root=pathlib.Path(tmp))
         mem.save_scratchpad("test content")
@@ -212,19 +212,19 @@ def test_memory_scratchpad():
 
 def test_memory_identity():
     """Memory reads/writes identity without crash."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     with tempfile.TemporaryDirectory() as tmp:
         mem = Memory(drive_root=pathlib.Path(tmp))
         # Write identity file directly (identity_path is a method)
         mem.identity_path().parent.mkdir(parents=True, exist_ok=True)
-        mem.identity_path().write_text("I am Ouroboros")
+        mem.identity_path().write_text("I am Ouro")
         content = mem.load_identity()
-        assert "Ouroboros" in content
+        assert "Ouro" in content
 
 
 def test_memory_chat_history_empty():
     """Chat history returns string when no data."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     with tempfile.TemporaryDirectory() as tmp:
         mem = Memory(drive_root=pathlib.Path(tmp))
         history = mem.chat_history(count=10)
@@ -233,7 +233,7 @@ def test_memory_chat_history_empty():
 
 def test_memory_persistence():
     """Memory persists across instances (write with one, read with another)."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = pathlib.Path(tmp)
 
@@ -251,14 +251,14 @@ def test_memory_persistence():
 
 def test_context_build_runtime_section():
     """Runtime section builder is callable."""
-    from ouroboros.context import _build_runtime_section
+    from ouro.context import _build_runtime_section
     # Just check it's importable and callable
     assert callable(_build_runtime_section)
 
 
 def test_context_build_memory_sections():
     """Memory sections builder is callable."""
-    from ouroboros.context import _build_memory_sections
+    from ouro.context import _build_memory_sections
     assert callable(_build_memory_sections)
 
 
@@ -276,7 +276,7 @@ def test_no_hardcoded_replies():
         re.IGNORECASE,
     )
     violations = []
-    for root, dirs, files in os.walk(REPO / "ouroboros"):
+    for root, dirs, files in os.walk(REPO / "ouro"):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in files:
             if not f.endswith(".py"):
@@ -366,7 +366,7 @@ def test_no_bare_except_pass():
     bare except (no Exception class) followed by pass.
     """
     violations = []
-    for root, dirs, files in os.walk(REPO / "ouroboros"):
+    for root, dirs, files in os.walk(REPO / "ouro"):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for f in files:
             if not f.endswith(".py"):
@@ -434,28 +434,28 @@ class TestPrePushGate:
     """Tests for pre-push test gate in git.py."""
 
     def test_run_pre_push_tests_disabled(self):
-        """When OUROBOROS_PRE_PUSH_TESTS=0, should return None (skip)."""
+        """When OURO_PRE_PUSH_TESTS=0, should return None (skip)."""
         import os
-        from ouroboros.tools.git import _run_pre_push_tests
-        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
+        from ouro.tools.git import _run_pre_push_tests
+        old = os.environ.get("OURO_PRE_PUSH_TESTS")
         try:
-            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
+            os.environ["OURO_PRE_PUSH_TESTS"] = "0"
             # ctx doesn't matter since we return early
             result = _run_pre_push_tests(None)
             assert result is None
         finally:
             if old is None:
-                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
+                os.environ.pop("OURO_PRE_PUSH_TESTS", None)
             else:
-                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
+                os.environ["OURO_PRE_PUSH_TESTS"] = old
 
     def test_run_pre_push_tests_no_tests_dir(self):
         """When tests/ dir doesn't exist, should return None."""
-        from ouroboros.tools.git import _run_pre_push_tests
+        from ouro.tools.git import _run_pre_push_tests
         import os
-        old = os.environ.get("OUROBOROS_PRE_PUSH_TESTS")
+        old = os.environ.get("OURO_PRE_PUSH_TESTS")
         try:
-            os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "1"
+            os.environ["OURO_PRE_PUSH_TESTS"] = "1"
             # Create a mock ctx with non-existent repo_dir
             class FakeCtx:
                 repo_dir = "/tmp/nonexistent_repo_dir_12345"
@@ -463,11 +463,11 @@ class TestPrePushGate:
             assert result is None
         finally:
             if old is None:
-                os.environ.pop("OUROBOROS_PRE_PUSH_TESTS", None)
+                os.environ.pop("OURO_PRE_PUSH_TESTS", None)
             else:
-                os.environ["OUROBOROS_PRE_PUSH_TESTS"] = old
+                os.environ["OURO_PRE_PUSH_TESTS"] = old
 
     def test_git_push_with_tests_exists(self):
         """_git_push_with_tests helper exists and is callable."""
-        from ouroboros.tools.git import _git_push_with_tests
+        from ouro.tools.git import _git_push_with_tests
         assert callable(_git_push_with_tests)

@@ -15,8 +15,8 @@ Every improvement follows this sequence. No shortcuts.
 Understand the current state before touching anything.
 
 ```
-repo_read("ouroboros/target_module.py")
-run_shell(["wc", "-l", "ouroboros/target_module.py"])
+repo_read("ouro/target_module.py")
+run_shell(["wc", "-l", "ouro/target_module.py"])
 git_status()
 git_diff()
 ```
@@ -72,7 +72,7 @@ git_status()   # only expected files changed?
 
 Always run both checks:
 ```
-run_shell(["python", "-c", "import ouroboros.agent"])   # import check
+run_shell(["python", "-c", "import ouro.agent"])   # import check
 run_shell(["python", "-m", "pytest", "tests/", "-x", "-q"])  # smoke tests
 ```
 
@@ -159,17 +159,17 @@ Sources of improvement ideas:
 
 ### Code editing
 ```
-claude_code_edit(prompt="In /app/ouroboros/module.py, replace function X with Y.
+claude_code_edit(prompt="In /app/ouro/module.py, replace function X with Y.
 Reason: [why]. Keep the existing signature unchanged.")
 ```
-- Claude Code CLI runs as `ouroboros` user (non-root).
+- Claude Code CLI runs as `ouro` user (non-root).
 - Max 12 turns, 300s timeout.
 - Tools available inside: Read, Write, Edit, Grep, Glob.
 
 ### Multi-model review (for significant changes)
 ```
 multi_model_review(prompt="Review this change for correctness and edge cases",
-                   files=["ouroboros/module.py"])
+                   files=["ouro/module.py"])
 ```
 
 ### Knowledge base (persist lessons)

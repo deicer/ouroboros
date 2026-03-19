@@ -114,8 +114,8 @@ def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
         pass
 
 
-# Re-export append_jsonl from ouroboros.utils (single source of truth)
-from ouroboros.utils import append_jsonl  # noqa: F401
+# Re-export append_jsonl from ouro.utils (single source of truth)
+from ouro.utils import append_jsonl  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 [project]
-name = "ouroboros"
+name = "ouro"
 version = "1.0.1"
 description = "Self-creating agent"
 requires-python = ">=3.10"

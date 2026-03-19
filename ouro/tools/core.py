@@ -10,8 +10,8 @@ import pathlib
 import uuid
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import read_text, safe_relpath, utc_now_iso
+from ouro.tools.registry import ToolContext, ToolEntry
+from ouro.utils import read_text, safe_relpath, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -205,7 +205,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
     """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+    from ouro.llm import LLMClient, DEFAULT_LIGHT_MODEL
 
     # Read last_n messages from chat.jsonl
     chat_path = ctx.drive_root / "logs" / "chat.jsonl"
@@ -235,14 +235,14 @@ def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
         for entry in entries:
             ts = entry.get("ts", "")
             direction = entry.get("direction", "")
-            role = "User" if direction == "in" else "Ouroboros"
+            role = "User" if direction == "in" else "Ouro"
             text = entry.get("text", "")
             dialogue_text.append(f"[{ts}] {role}: {text}")
 
         formatted_dialogue = "\n".join(dialogue_text)
 
         # Build summarization prompt
-        prompt = f"""Summarize the following dialogue history between the user and Ouroboros.
+        prompt = f"""Summarize the following dialogue history between the user and Ouro.
 
 Extract:
 1. Key decisions made (technical, architectural, strategic)
@@ -262,7 +262,7 @@ Now write a comprehensive summary:"""
 
         # Call LLM
         llm = LLMClient()
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        model = os.environ.get("OURO_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
 
         messages = [
             {"role": "user", "content": prompt}
@@ -319,7 +319,7 @@ Now write a comprehensive summary:"""
 
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
-    from ouroboros.owner_inject import write_owner_message
+    from ouro.owner_inject import write_owner_message
     write_owner_message(ctx.drive_root, message, task_id=task_id, msg_id=uuid.uuid4().hex)
     return f"Message forwarded to task {task_id}"
 

@@ -33,12 +33,12 @@ RUN npm install -g @anthropic-ai/claude-code \
 # Pre-cache skills.sh CLI for Agent Skills support
 RUN npx -y skills --version || true
 
-# Create ouroboros OS user (bypassPermissions is blocked for root)
-RUN useradd -m -s /bin/bash ouroboros
+# Create ouro OS user (bypassPermissions is blocked for root)
+RUN useradd -m -s /bin/bash ouro
 
 COPY . .
 RUN git config --global --add safe.directory /app
-RUN chown -R ouroboros:ouroboros /app
+RUN chown -R ouro:ouro /app
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "launcher.py"]

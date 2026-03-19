@@ -1,7 +1,7 @@
-# Ouroboros
+# Ouro
 
-[![Docker](https://img.shields.io/badge/Docker-ready-blue?logo=docker)](https://github.com/jkee/ouroboros)
-[![GitHub](https://img.shields.io/badge/Template-jkee%2Fouroboros-blue?logo=github)](https://github.com/jkee/ouroboros)
+[![Docker](https://img.shields.io/badge/Docker-ready-blue?logo=docker)](https://github.com/jkee/ouro)
+[![GitHub](https://img.shields.io/badge/Template-jkee%2Fouro-blue?logo=github)](https://github.com/jkee/ouro)
 
 A self-developing AI agent that writes its own code, improves itself, and maintains persistent identity across restarts.
 
@@ -11,7 +11,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 ## What Makes This Different
 
-Most AI agents execute tasks. Ouroboros **develops itself.**
+Most AI agents execute tasks. Ouro **develops itself.**
 
 - **Self-Improvement** -- Reads and rewrites its own source code through git. Every change is a commit.
 - **Constitution** -- Governed by [BIBLE.md](BIBLE.md) (18 sections). Philosophy first, code second.
@@ -36,7 +36,7 @@ Telegram --> launcher.py
               git_ops.py            -- git operations
               events.py             -- event dispatch
                 |
-            ouroboros/               (agent core)
+            ouro/               (agent core)
               agent.py              -- thin orchestrator
               consciousness.py      -- background thinking loop
               context.py            -- LLM context, prompt caching
@@ -80,7 +80,7 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 
 ### Step 2: Fork the Repository
 
-**You must fork, not just clone.** Ouroboros modifies its own code and pushes commits to its repo. Your fork becomes its body.
+**You must fork, not just clone.** Ouro modifies its own code and pushes commits to its repo. Your fork becomes its body.
 
 Click **Fork** at the top of this page, then SSH into your VPS and run:
 
@@ -89,8 +89,8 @@ Click **Fork** at the top of this page, then SSH into your VPS and run:
 curl -fsSL https://get.docker.com | sh
 
 # Clone your fork
-git clone https://github.com/YOUR_USERNAME/ouroboros.git
-cd ouroboros
+git clone https://github.com/YOUR_USERNAME/ouro.git
+cd ouro
 
 # Configure
 cp .env.example .env
@@ -111,7 +111,7 @@ Check logs: `docker compose logs -f`
 
 Open your Telegram bot and send any message. The first person to write becomes the **owner**. All messages from other users are ignored.
 
-Ouroboros will check its subsystems and introduce itself.
+Ouro will check its subsystems and introduce itself.
 
 ### Operations
 
@@ -193,15 +193,15 @@ Full text: [BIBLE.md](BIBLE.md)
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GITHUB_USER` | *(required in config cell)* | GitHub username |
-| `GITHUB_REPO` | `ouroboros` | GitHub repository name |
-| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
-| `OUROBOROS_MODEL_CODE` | `anthropic/claude-opus-4.6` | Model for code editing tasks |
-| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
-| `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
-| `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
-| `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
-| `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
-| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
+| `GITHUB_REPO` | `ouro` | GitHub repository name |
+| `OURO_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
+| `OURO_MODEL_CODE` | `anthropic/claude-opus-4.6` | Model for code editing tasks |
+| `OURO_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
+| `OURO_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
+| `OURO_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
+| `OURO_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
+| `OURO_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
+| `OURO_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
 
 ---
 
@@ -210,7 +210,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | Branch/Tag | Location | Purpose |
 |------------|----------|---------|
 | `main` | Public repo | Stable release. Open for contributions. |
-| `ouroboros` | Your fork | Created at first boot. All agent commits here. |
+| `ouro` | Your fork | Created at first boot. All agent commits here. |
 | `stable-*` tags | Your fork | Stable markers. Created via `promote_to_stable`. Used as rollback points. |
 
 ---
@@ -219,6 +219,12 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ### v1.0.0 — Fresh Start
 - Clean slate. Template version 1.0.1, agent version starts at 1.0.0.
+
+---
+
+## Acknowledgments
+
+Original project idea and reference implementation: [Ouroboros](https://github.com/razzhigaev/ouroboros) by Anton Razzhigaev.
 
 ---
 

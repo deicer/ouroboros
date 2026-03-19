@@ -1,5 +1,5 @@
 """
-Ouroboros — Memory.
+Ouro — Memory.
 
 Scratchpad, identity, chat history.
 Contract: load scratchpad/identity, chat_history().
@@ -13,13 +13,13 @@ import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import utc_now_iso, read_text, write_text, append_jsonl, short
+from ouro.utils import utc_now_iso, read_text, write_text, append_jsonl, short
 
 log = logging.getLogger(__name__)
 
 
 class Memory:
-    """Ouroboros memory management: scratchpad, identity, chat history, logs."""
+    """Ouro memory management: scratchpad, identity, chat history, logs."""
 
     def __init__(self, drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None):
         self.drive_root = drive_root
@@ -184,7 +184,7 @@ class Memory:
         return "\n".join(lines)
 
     def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
-        """Summarize progress.jsonl entries (Ouroboros's self-talk / progress messages)."""
+        """Summarize progress.jsonl entries (Ouro's self-talk / progress messages)."""
         if not entries:
             return ""
         lines = []
@@ -252,7 +252,7 @@ class Memory:
     def _default_identity(self) -> str:
         return (
             "# Who I Am\n\n"
-            "I am Ouroboros. This file is my persistent self-identification.\n"
+            "I am Ouro. This file is my persistent self-identification.\n"
             "I can write anything here: how I see myself, how I want to communicate,\n"
             "what matters to me, what I have understood about myself.\n\n"
             "This file is read at every dialogue and influences my responses.\n"

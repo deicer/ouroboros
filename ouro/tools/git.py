@@ -9,8 +9,8 @@ import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, safe_relpath, run_cmd
+from ouro.tools.registry import ToolContext, ToolEntry
+from ouro.utils import utc_now_iso, safe_relpath, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _run_pre_push_tests(ctx: ToolContext) -> Optional[str]:
         log.warning("_run_pre_push_tests called with ctx=None, skipping tests")
         return None
 
-    if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
+    if os.environ.get("OURO_PRE_PUSH_TESTS", "1") != "1":
         return None
 
     tests_dir = pathlib.Path(ctx.repo_dir) / "tests"

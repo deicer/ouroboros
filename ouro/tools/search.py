@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any, Dict, List
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouro.tools.registry import ToolContext, ToolEntry
 
 
 def _web_search(ctx: ToolContext, query: str) -> str:
@@ -17,7 +17,7 @@ def _web_search(ctx: ToolContext, query: str) -> str:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
         resp = client.responses.create(
-            model=os.environ.get("OUROBOROS_WEBSEARCH_MODEL", "gpt-5.4-mini"),
+            model=os.environ.get("OURO_WEBSEARCH_MODEL", "gpt-5.4-mini"),
             tools=[{"type": "web_search"}],
             tool_choice="auto",
             input=query,

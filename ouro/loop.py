@@ -1,5 +1,5 @@
 """
-Ouroboros — LLM tool loop.
+Ouro — LLM tool loop.
 
 Core loop: send messages to LLM, execute tool calls, repeat until final response.
 Extracted from agent.py to keep the agent thin.
@@ -23,10 +23,10 @@ try:
 except ImportError:
     _OAIAuthError = _OAIRateLimitError = None
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage, estimate_cost
-from ouroboros.tools.registry import ToolRegistry
-from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
+from ouro.llm import LLMClient, normalize_reasoning_effort, add_usage, estimate_cost
+from ouro.tools.registry import ToolRegistry
+from ouro.context import compact_tool_history, compact_tool_history_llm
+from ouro.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
 
 log = logging.getLogger(__name__)
 
@@ -490,7 +490,7 @@ def _drain_incoming_messages(
 
     # Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool)
     if drive_root is not None and task_id:
-        from ouroboros.owner_inject import drain_owner_messages
+        from ouro.owner_inject import drain_owner_messages
         drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
         for dmsg in drive_msgs:
             messages.append({
@@ -543,7 +543,7 @@ def run_llm_loop(
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
     # Wire module-level registry ref so tool_discovery handlers work outside run_llm_loop too
-    from ouroboros.tools import tool_discovery as _td
+    from ouro.tools import tool_discovery as _td
     _td.set_registry(tools)
 
     # Selective tool schemas: core set + meta-tools for discovery.
@@ -558,10 +558,10 @@ def run_llm_loop(
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
     try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
+        MAX_ROUNDS = max(1, int(os.environ.get("OURO_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
         MAX_ROUNDS = 200
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+        log.warning("Invalid OURO_MAX_ROUNDS, defaulting to 200")
     round_idx = 0
     try:
         while True:
@@ -621,7 +621,7 @@ def run_llm_loop(
             if msg is None:
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
-                    "OUROBOROS_MODEL_FALLBACK_LIST",
+                    "OURO_MODEL_FALLBACK_LIST",
                     "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
@@ -693,7 +693,7 @@ def run_llm_loop(
         # Cleanup per-task mailbox
         if drive_root is not None and task_id:
             try:
-                from ouroboros.owner_inject import cleanup_task_mailbox
+                from ouro.owner_inject import cleanup_task_mailbox
                 cleanup_task_mailbox(drive_root, task_id)
             except Exception:
                 log.debug("Failed to cleanup task mailbox", exc_info=True)

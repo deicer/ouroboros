@@ -9,8 +9,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, write_text, run_cmd
+from ouro.tools.registry import ToolContext, ToolEntry
+from ouro.utils import utc_now_iso, write_text, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
         return f"ERROR: Subtask depth limit ({MAX_SUBTASK_DEPTH}) exceeded. Simplify your approach."
 
     if getattr(ctx, 'is_direct_chat', False):
-        from ouroboros.utils import append_jsonl
+        from ouro.utils import append_jsonl
         try:
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
                 "ts": utc_now_iso(),
@@ -61,7 +61,7 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
             pass
 
     if getattr(ctx, 'is_consciousness', False):
-        from ouroboros.utils import append_jsonl
+        from ouro.utils import append_jsonl
         try:
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
                 "ts": utc_now_iso(),
@@ -92,14 +92,14 @@ def _request_review(ctx: ToolContext, reason: str) -> str:
 
 
 def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: str = "") -> str:
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     return mem.chat_history(count=count, offset=offset, search=search)
 
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     """LLM-driven scratchpad update."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()
     mem.save_scratchpad(content)
@@ -122,7 +122,7 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
     if not text or not text.strip():
         return "⚠️ Empty message."
 
-    from ouroboros.utils import append_jsonl
+    from ouro.utils import append_jsonl
     ctx.pending_events.append({
         "type": "send_message",
         "chat_id": ctx.current_chat_id,
@@ -150,7 +150,7 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
 
 def _update_user_context(ctx: ToolContext, content: str) -> str:
     """Update user context (who the user is, their goals, priorities). Keep under 1000 chars."""
-    from ouroboros.memory import Memory
+    from ouro.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.save_user_context(content)
     warning = ""
@@ -185,7 +185,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
 
     Stored in ToolContext, applied on the next LLM call in the loop.
     """
-    from ouroboros.llm import LLMClient, normalize_reasoning_effort
+    from ouro.llm import LLMClient, normalize_reasoning_effort
     available = LLMClient().available_models()
     changes = []
 
@@ -307,7 +307,7 @@ def get_tools() -> List[ToolEntry]:
         }, _update_user_context),
         ToolEntry("toggle_evolution", {
             "name": "toggle_evolution",
-            "description": "Enable or disable evolution mode. When enabled, Ouroboros runs continuous self-improvement cycles.",
+            "description": "Enable or disable evolution mode. When enabled, Ouro runs continuous self-improvement cycles.",
             "parameters": {"type": "object", "properties": {
                 "enabled": {"type": "boolean", "description": "true to enable, false to disable"},
             }, "required": ["enabled"]},

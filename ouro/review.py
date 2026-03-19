@@ -1,5 +1,5 @@
 """
-Ouroboros — Review utilities.
+Ouro — Review utilities.
 
 Utilities for code collection and complexity metrics.
 Review tasks go through the standard agent tool loop (LLM-first).
@@ -11,7 +11,7 @@ import os
 import pathlib
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.utils import clip_text, estimate_tokens
+from ouro.utils import clip_text, estimate_tokens
 
 
 _SKIP_EXT = {

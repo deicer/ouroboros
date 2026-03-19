@@ -1,5 +1,5 @@
 """
-Vision Language Model (VLM) tools for Ouroboros.
+Vision Language Model (VLM) tools for Ouro.
 
 Allows the agent to analyze screenshots and images using LLM vision capabilities.
 Integrates with the existing browser screenshot workflow:
@@ -16,7 +16,7 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouro.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 
@@ -25,12 +25,12 @@ _DEFAULT_VLM_MODEL = "anthropic/claude-sonnet-4.6"
 
 def _get_vlm_model() -> str:
     """Get VLM model from env or use default."""
-    return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
+    return os.environ.get("OURO_MODEL", _DEFAULT_VLM_MODEL)
 
 
 def _get_llm_client():
     """Lazy-import LLMClient to avoid circular imports."""
-    from ouroboros.llm import LLMClient
+    from ouro.llm import LLMClient
     return LLMClient()
 
 
@@ -142,7 +142,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "model": {
                             "type": "string",
-                            "description": "VLM model to use (default: current OUROBOROS_MODEL)",
+                            "description": "VLM model to use (default: current OURO_MODEL)",
                         },
                     },
                     "required": [],
@@ -181,7 +181,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "model": {
                             "type": "string",
-                            "description": "VLM model to use (default: current OUROBOROS_MODEL)",
+                            "description": "VLM model to use (default: current OURO_MODEL)",
                         },
                     },
                     "required": ["prompt"],

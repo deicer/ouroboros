@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import List
 
-from ouroboros.tools.registry import ToolEntry, ToolContext
+from ouro.tools.registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
 

@@ -1,5 +1,5 @@
 """
-E2E test harness for Ouroboros.
+E2E test harness for Ouro.
 
 Sets up an isolated agent environment: copies repo to tmpdir,
 creates fresh data dir, overrides dangerous tools, runs agent.handle_task,
@@ -48,7 +48,7 @@ def git_diff_from_initial(repo_dir: Path) -> str:
 
 
 class E2EHarness:
-    """Sets up and runs an Ouroboros agent in an isolated environment."""
+    """Sets up and runs an Ouro agent in an isolated environment."""
 
     def __init__(self, work_dir: Path):
         self.work_dir = work_dir
@@ -65,7 +65,7 @@ class E2EHarness:
             return
 
         # 1. Copy source to isolated repo
-        src = Path("/app") if Path("/app/ouroboros").exists() else Path(__file__).resolve().parent.parent.parent
+        src = Path("/app") if Path("/app/ouro").exists() else Path(__file__).resolve().parent.parent.parent
         shutil.copytree(
             src, self.repo_dir,
             ignore=shutil.ignore_patterns(
@@ -87,10 +87,10 @@ class E2EHarness:
         (self.drive_root / "state" / "state.json").write_text("{}")
 
         # 3. Set env vars
-        os.environ["OUROBOROS_PRE_PUSH_TESTS"] = "0"
+        os.environ["OURO_PRE_PUSH_TESTS"] = "0"
 
         # 4. Create agent
-        from ouroboros.agent import make_agent
+        from ouro.agent import make_agent
         agent = make_agent(
             repo_dir=str(self.repo_dir),
             drive_root=str(self.drive_root),
@@ -135,7 +135,7 @@ class E2EHarness:
         """
         self._setup()
 
-        os.environ["OUROBOROS_MAX_ROUNDS"] = str(max_rounds)
+        os.environ["OURO_MAX_ROUNDS"] = str(max_rounds)
 
         # Clear per-run owner messages
         run_owner_messages: List[str] = []

@@ -7,8 +7,8 @@ import logging
 import re
 from typing import Any, Dict, List
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import append_jsonl, get_git_info, read_text, utc_now_iso, write_text
+from ouro.tools.registry import ToolContext, ToolEntry
+from ouro.utils import append_jsonl, get_git_info, read_text, utc_now_iso, write_text
 
 log = logging.getLogger(__name__)
 

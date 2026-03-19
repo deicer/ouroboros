@@ -1,5 +1,5 @@
 # ============================
-# Ouroboros — Runtime launcher (entry point for Docker VPS)
+# Ouro — Runtime launcher (entry point for Docker VPS)
 # ============================
 # Thin orchestrator: secrets, bootstrap, main loop.
 # Heavy logic lives in supervisor/ package.
@@ -16,8 +16,8 @@ log = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
-from ouroboros.apply_patch import install as install_apply_patch
-from ouroboros.llm import DEFAULT_LIGHT_MODEL
+from ouro.apply_patch import install as install_apply_patch
+from ouro.llm import DEFAULT_LIGHT_MODEL
 install_apply_patch()
 
 # ----------------------------
@@ -58,21 +58,21 @@ GITHUB_USER = get_cfg("GITHUB_USER")
 GITHUB_REPO = get_cfg("GITHUB_REPO")
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your .env file."
 assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to your .env file."
-MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5") or "5")
-MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6")
-MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-opus-4-6")
-MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL)
+MAX_WORKERS = int(get_cfg("OURO_MAX_WORKERS", default="5") or "5")
+MODEL_MAIN = get_cfg("OURO_MODEL", default="anthropic/claude-sonnet-4.6")
+MODEL_CODE = get_cfg("OURO_MODEL_CODE", default="anthropic/claude-opus-4-6")
+MODEL_LIGHT = get_cfg("OURO_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
-SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600") or "600"))
-HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800") or "1800"))
+SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OURO_SOFT_TIMEOUT_SEC", default="600") or "600"))
+HARD_TIMEOUT_SEC = max(120, int(get_cfg("OURO_HARD_TIMEOUT_SEC", default="1800") or "1800"))
 DIAG_HEARTBEAT_SEC = _parse_int_cfg(
-    get_cfg("OUROBOROS_DIAG_HEARTBEAT_SEC", default="30"),
+    get_cfg("OURO_DIAG_HEARTBEAT_SEC", default="30"),
     default=30,
     minimum=0,
 )
 DIAG_SLOW_CYCLE_SEC = _parse_int_cfg(
-    get_cfg("OUROBOROS_DIAG_SLOW_CYCLE_SEC", default="20"),
+    get_cfg("OURO_DIAG_SLOW_CYCLE_SEC", default="20"),
     default=20,
     minimum=0,
 )
@@ -82,19 +82,19 @@ os.environ["OPENAI_API_KEY"] = str(OPENAI_API_KEY or "")
 os.environ["ANTHROPIC_API_KEY"] = str(ANTHROPIC_API_KEY)
 os.environ["GITHUB_USER"] = str(GITHUB_USER)
 os.environ["GITHUB_REPO"] = str(GITHUB_REPO)
-os.environ["OUROBOROS_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
-os.environ["OUROBOROS_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
+os.environ["OURO_MODEL"] = str(MODEL_MAIN or "anthropic/claude-sonnet-4.6")
+os.environ["OURO_MODEL_CODE"] = str(MODEL_CODE or "anthropic/claude-sonnet-4.6")
 if MODEL_LIGHT:
-    os.environ["OUROBOROS_MODEL_LIGHT"] = str(MODEL_LIGHT)
-os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
-os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
+    os.environ["OURO_MODEL_LIGHT"] = str(MODEL_LIGHT)
+os.environ["OURO_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
+os.environ["OURO_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
 
 # ----------------------------
 # 2) Paths
 # ----------------------------
 DRIVE_ROOT = pathlib.Path(os.environ.get("DRIVE_ROOT", "/data")).resolve()
-REPO_DIR = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "/app")).resolve()
+REPO_DIR = pathlib.Path(os.environ.get("OURO_REPO_DIR", "/app")).resolve()
 
 for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
@@ -102,7 +102,7 @@ REPO_DIR.mkdir(parents=True, exist_ok=True)
 
 # Clear stale owner mailbox files from previous session
 try:
-    from ouroboros.owner_inject import get_pending_path
+    from ouro.owner_inject import get_pending_path
     # Clean legacy global file
     _stale_inject = get_pending_path(DRIVE_ROOT)
     if _stale_inject.exists():
@@ -122,12 +122,12 @@ if not CHAT_LOG_PATH.exists():
 # ----------------------------
 # 3) Git constants
 # ----------------------------
-_BRANCH_PREFIX = get_cfg("OUROBOROS_BRANCH_PREFIX")
-assert _BRANCH_PREFIX and str(_BRANCH_PREFIX).strip(), "OUROBOROS_BRANCH_PREFIX not set. Add it to your .env file."
+_BRANCH_PREFIX = get_cfg("OURO_BRANCH_PREFIX")
+assert _BRANCH_PREFIX and str(_BRANCH_PREFIX).strip(), "OURO_BRANCH_PREFIX not set. Add it to your .env file."
 BRANCH_DEV = _BRANCH_PREFIX
 BRANCH_STABLE = f"{_BRANCH_PREFIX}-stable"
 REMOTE_URL = f"https://{GITHUB_TOKEN}:x-oauth-basic@github.com/{GITHUB_USER}/{GITHUB_REPO}.git"
-os.environ["OUROBOROS_BRANCH_PREFIX"] = str(_BRANCH_PREFIX)
+os.environ["OURO_BRANCH_PREFIX"] = str(_BRANCH_PREFIX)
 
 # ----------------------------
 # 4) Initialize supervisor modules
@@ -253,7 +253,7 @@ append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
     "max_workers": MAX_WORKERS,
     "model_default": MODEL_MAIN, "model_code": MODEL_CODE, "model_light": MODEL_LIGHT,
     "soft_timeout_sec": SOFT_TIMEOUT_SEC, "hard_timeout_sec": HARD_TIMEOUT_SEC,
-    "worker_start_method": str(os.environ.get("OUROBOROS_WORKER_START_METHOD") or ""),
+    "worker_start_method": str(os.environ.get("OURO_WORKER_START_METHOD") or ""),
     "diag_heartbeat_sec": DIAG_HEARTBEAT_SEC,
     "diag_slow_cycle_sec": DIAG_SLOW_CYCLE_SEC,
 })
@@ -312,7 +312,7 @@ _watchdog_thread.start()
 # ----------------------------
 # 6.3) Background consciousness
 # ----------------------------
-from ouroboros.consciousness import BackgroundConsciousness
+from ouro.consciousness import BackgroundConsciousness
 
 def _get_owner_chat_id() -> Optional[int]:
     try:
@@ -643,7 +643,7 @@ while True:
             except Exception:
                 log.warning("Supervisor command handler error", exc_info=True)
 
-        # All other messages (and dual-path commands) -> direct chat with Ouroboros
+        # All other messages (and dual-path commands) -> direct chat with Ouro
         if not text and not image_data:
             continue  # empty message, skip
 

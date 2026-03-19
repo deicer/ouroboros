@@ -12,8 +12,8 @@ import subprocess
 import tempfile
 from typing import Any, Dict, List
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
+from ouro.tools.registry import ToolContext, ToolEntry
+from ouro.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
 
 
 def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.CompletedProcess:
-    """Run Claude CLI as ouroboros user with tempfile-based prompt."""
+    """Run Claude CLI as ouro user with tempfile-based prompt."""
     claude_bin = shutil.which("claude") or "claude"
     tmp_path = None
     try:
@@ -105,7 +105,7 @@ def _run_claude_cli(work_dir: str, prompt: str, env: dict) -> subprocess.Complet
             f" --tools Read,Write,Edit,Grep,Glob"
             f" --permission-mode bypassPermissions"
         )
-        cmd = ["su", "-s", "/bin/bash", "-c", inner_cmd, "ouroboros"]
+        cmd = ["su", "-s", "/bin/bash", "-c", inner_cmd, "ouro"]
 
         return subprocess.run(
             cmd, cwd=work_dir,
@@ -197,7 +197,7 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
 
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
-    from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
+    from ouro.tools.git import _acquire_git_lock, _release_git_lock
 
     api_key = os.environ["ANTHROPIC_API_KEY"]
 

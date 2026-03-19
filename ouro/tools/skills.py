@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from ouroboros.tools.registry import ToolEntry, ToolContext
+from ouro.tools.registry import ToolEntry, ToolContext
 
 log = logging.getLogger(__name__)
 

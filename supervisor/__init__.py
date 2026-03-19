@@ -1,1 +1,1 @@
-"""Ouroboros Supervisor package — decomposed from launcher.py."""
+"""Ouro Supervisor package — decomposed from launcher.py."""

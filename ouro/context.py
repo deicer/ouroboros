@@ -1,5 +1,5 @@
 """
-Ouroboros context builder.
+Ouro context builder.
 
 Assembles LLM context from prompts, memory, logs, and runtime state.
 Extracted from agent.py to keep the agent thin and focused.
@@ -14,11 +14,11 @@ import os
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.utils import (
+from ouro.utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_git_info,
     get_budget_remaining,
 )
-from ouroboros.memory import Memory
+from ouro.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ def _build_skills_index(skills_dir: pathlib.Path) -> str:
     if not skills_dir.exists():
         return ""
     try:
-        from ouroboros.tools.skills import _parse_skill_md
+        from ouro.tools.skills import _parse_skill_md
     except Exception:
         return ""
     skills = []
@@ -338,7 +338,7 @@ def build_llm_messages(
     # --- Read base prompts and state ---
     base_prompt = _safe_read(
         env.repo_path("prompts/SYSTEM.md"),
-        fallback="You are Ouroboros. Your base prompt could not be loaded."
+        fallback="You are Ouro. Your base prompt could not be loaded."
     ).replace("{branch_dev}", env.branch_dev)
     bible_md = _safe_read(env.repo_path("BIBLE.md"))
     readme_md = _safe_read(env.repo_path("README.md"))
@@ -685,8 +685,8 @@ def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
     )
 
     try:
-        from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
-        light_model = os.environ.get("OUROBOROS_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
+        from ouro.llm import LLMClient, DEFAULT_LIGHT_MODEL
+        light_model = os.environ.get("OURO_MODEL_LIGHT") or DEFAULT_LIGHT_MODEL
         client = LLMClient()
         resp_msg, _usage = client.chat(
             messages=[{"role": "user", "content": prompt}],

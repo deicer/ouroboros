@@ -1,5 +1,5 @@
 """
-Ouroboros — LLM client.
+Ouro — LLM client.
 
 The only module that communicates with the LLM API (OpenRouter).
 Contract: chat(), default_model(), available_models(), add_usage(), estimate_cost().
@@ -40,7 +40,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
     Returns empty dict on failure.
     """
     import logging
-    log = logging.getLogger("ouroboros.llm")
+    log = logging.getLogger("ouro.llm")
 
     try:
         import requests
@@ -207,8 +207,8 @@ class LLMClient:
                 base_url=self._base_url,
                 api_key=self._api_key,
                 default_headers={
-                    "HTTP-Referer": f"https://github.com/{os.environ.get('GITHUB_USER', 'jkee')}/{os.environ.get('GITHUB_REPO', 'ouroboros')}",
-                    "X-Title": "Ouroboros",
+                    "HTTP-Referer": f"https://github.com/{os.environ.get('GITHUB_USER', 'jkee')}/{os.environ.get('GITHUB_REPO', 'ouro')}",
+                    "X-Title": "Ouro",
                 },
             )
         return self._client
@@ -366,13 +366,13 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        return os.environ.get("OURO_MODEL", "anthropic/claude-sonnet-4.6")
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
-        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
-        light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
+        main = os.environ.get("OURO_MODEL", "anthropic/claude-sonnet-4.6")
+        code = os.environ.get("OURO_MODEL_CODE", "")
+        light = os.environ.get("OURO_MODEL_LIGHT", "")
         models = [main]
         if code and code != main:
             models.append(code)

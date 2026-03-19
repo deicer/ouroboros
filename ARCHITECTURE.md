@@ -11,7 +11,7 @@ modify, and extend myself.
 I am a three-layer system: **Supervisor** (process management, communication),
 **Agent Core** (LLM reasoning loop), and **Tools** (plugin actions).
 
-**Entry point chain**: `launcher.py` → `supervisor/workers.py` → `ouroboros/agent.py` → `ouroboros/loop.py`
+**Entry point chain**: `launcher.py` → `supervisor/workers.py` → `ouro/agent.py` → `ouro/loop.py`
 
 **Runtime**: Docker container — Python 3.12-slim, Node.js 22 (Claude Code CLI),
 Playwright/Chromium, tini (PID 1). Resource limits: 1 CPU, 2 GB RAM.
@@ -102,7 +102,7 @@ Event dispatcher. Workers communicate with supervisor exclusively through a mult
 
 Per-worker agent instance. Each worker process creates its own Agent with independent state.
 
-### ouroboros/agent.py (~664 lines)
+### ouro/agent.py (~664 lines)
 
 Per-worker orchestrator. Created fresh in each worker process.
 
@@ -111,18 +111,18 @@ Per-worker orchestrator. Created fresh in each worker process.
 - Restart verification: after code push, verifies new worker loads correct git SHA.
 - Auto-rescue: detects and commits uncommitted changes on startup.
 
-### ouroboros/loop.py (~980 lines) — largest module
+### ouro/loop.py (~980 lines) — largest module
 
 Core LLM tool execution loop. This is my thinking-acting cycle.
 
-- `run_llm_loop()` — send messages to LLM → parse tool calls → execute tools → repeat. Up to 200 rounds per task (configurable via `OUROBOROS_MAX_ROUNDS`).
+- `run_llm_loop()` — send messages to LLM → parse tool calls → execute tools → repeat. Up to 200 rounds per task (configurable via `OURO_MAX_ROUNDS`).
 - **Parallel execution**: read-only tools run in parallel via ThreadPoolExecutor. Code-modifying tools run sequentially.
 - **Message assembly**: system prompt → tool schemas → context + memory → tool history → chat/recent sections → health invariants.
 - **Pricing**: static cost table + lazy fetch from OpenRouter API.
 - **Tool result truncation**: hard cap at 15,000 chars per result.
 - **Reasoning effort**: normalized to {none, minimal, low, medium, high, xhigh} (Claude-specific).
 
-### ouroboros/llm.py (~290 lines)
+### ouro/llm.py (~290 lines)
 
 SSOT for all LLM API calls. Only module that talks to OpenRouter.
 
@@ -130,7 +130,7 @@ SSOT for all LLM API calls. Only module that talks to OpenRouter.
 - Usage tracking: accumulates tokens + cost across rounds.
 - **Default models**: main = `claude-sonnet-4.6`, code = `claude-opus-4.6`, light = `gemini-3-pro-preview`.
 
-### ouroboros/context.py (~818 lines)
+### ouro/context.py (~818 lines)
 
 Builds the full LLM message array for each round.
 
@@ -139,7 +139,7 @@ Builds the full LLM message array for each round.
 - **Context compaction**: `compact_tool_history()` trims old tool results when approaching limits.
 - **Prompt caching**: cache_control markers for stable prefix sections.
 
-### ouroboros/memory.py (~269 lines)
+### ouro/memory.py (~269 lines)
 
 Persistent memory file manager. All files under `/data/memory/`.
 
@@ -147,13 +147,13 @@ Persistent memory file manager. All files under `/data/memory/`.
 - `chat_history()` — reads from `/data/logs/chat.jsonl` with search/offset support.
 - `read_jsonl_tail()` — reads last N entries from any JSONL log.
 
-### ouroboros/consciousness.py (~525 lines)
+### ouro/consciousness.py (~525 lines)
 
 Background thinking daemon. Runs between tasks in a daemon thread.
 
 - **Lifecycle**: `start()`, `stop()`, `pause()` (during tasks), `resume()` (after tasks).
 - **Loop**: sleep → budget check → build lightweight context → LLM call (light model) → up to 5 tool rounds → set next wakeup.
-- **Budget cap**: 10% of total OpenRouter budget (`OUROBOROS_BG_BUDGET_PCT`).
+- **Budget cap**: 10% of total OpenRouter budget (`OURO_BG_BUDGET_PCT`).
 - **Architecture reviews**: proactively schedules ARCHITECTURE.md review every 50 thoughts.
 - **Observation queue**: main agent can feed observations via `inject_observation()`.
 
@@ -165,16 +165,16 @@ Plugin architecture with auto-discovery. ~57 tools across 17 modules.
 
 ### Plugin System
 
-`ouroboros/tools/registry.py` (~195 lines) — SSOT for tool management.
+`ouro/tools/registry.py` (~195 lines) — SSOT for tool management.
 
-- **Auto-discovery**: `pkgutil.iter_modules()` finds all modules in `ouroboros/tools/` that export `get_tools() -> List[ToolEntry]`.
+- **Auto-discovery**: `pkgutil.iter_modules()` finds all modules in `ouro/tools/` that export `get_tools() -> List[ToolEntry]`.
 - **ToolEntry**: `name`, `schema` (JSON Schema), `handler` function, `is_code_tool` flag, `timeout_sec`.
 - **ToolContext**: dataclass passed to every handler — `repo_dir`, `drive_root`, `branch_dev`, `event_queue`, `task_id`, `browser_state`, `task_depth`, `is_direct_chat`, `is_consciousness`.
 - **Core vs extended**: core tools (28) always in LLM schema. Extended tools discoverable via `list_available_tools` / `enable_tools`.
 
 ### Adding a Tool
 
-Create `ouroboros/tools/my_tool.py`, export `get_tools() -> List[ToolEntry]`. No registration code needed — the registry discovers it automatically.
+Create `ouro/tools/my_tool.py`, export `get_tools() -> List[ToolEntry]`. No registration code needed — the registry discovers it automatically.
 
 ### Tool Modules
 
@@ -347,37 +347,37 @@ Reference table for complexity tracking (BIBLE.md §8: keep under 2000 lines).
 
 | Module | Lines | Status |
 |--------|-------|--------|
-| ouroboros/loop.py | ~980 | ⚠️ At limit |
-| ouroboros/context.py | ~818 | OK |
+| ouro/loop.py | ~980 | ⚠️ At limit |
+| ouro/context.py | ~818 | OK |
 | launcher.py | ~796 | OK |
-| ouroboros/agent.py | ~664 | OK |
+| ouro/agent.py | ~664 | OK |
 | supervisor/state.py | ~600 | OK |
 | supervisor/workers.py | ~538 | OK |
-| ouroboros/consciousness.py | ~525 | OK |
+| ouro/consciousness.py | ~525 | OK |
 | supervisor/telegram.py | ~499 | OK |
 | supervisor/events.py | ~486 | OK |
 | supervisor/git_ops.py | ~465 | OK |
 | supervisor/queue.py | ~421 | OK |
-| ouroboros/tools/ (17 modules) | ~4265 | OK (largest: evolution_stats.py 433) |
-| ouroboros/memory.py | ~269 | OK |
-| ouroboros/llm.py | ~290 | OK |
-| ouroboros/tools/registry.py | ~195 | OK |
+| ouro/tools/ (17 modules) | ~4265 | OK (largest: evolution_stats.py 433) |
+| ouro/memory.py | ~269 | OK |
+| ouro/llm.py | ~290 | OK |
+| ouro/tools/registry.py | ~195 | OK |
 
 ---
 
 ## Configuration
 
-**Required env vars**: `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`, `ANTHROPIC_API_KEY`, `COMPOSIO_API_KEY`, `OUROBOROS_BRANCH_PREFIX`.
+**Required env vars**: `OPENROUTER_API_KEY`, `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `GITHUB_USER`, `GITHUB_REPO`, `ANTHROPIC_API_KEY`, `COMPOSIO_API_KEY`, `OURO_BRANCH_PREFIX`.
 
 **Optional tunables**:
-- `OUROBOROS_MAX_WORKERS` (default 5) — worker pool size.
-- `OUROBOROS_MODEL` (default `anthropic/claude-sonnet-4.6`) — main reasoning model.
-- `OUROBOROS_MODEL_CODE` (default `anthropic/claude-opus-4.6`) — code editing model.
-- `OUROBOROS_MODEL_LIGHT` (default `google/gemini-3-pro-preview`) — background consciousness model.
-- `OUROBOROS_SOFT_TIMEOUT_SEC` (default 600) — warning threshold.
-- `OUROBOROS_HARD_TIMEOUT_SEC` (default 1800) — kill threshold.
-- `OUROBOROS_BG_BUDGET_PCT` (default 10) — consciousness budget as % of total.
+- `OURO_MAX_WORKERS` (default 5) — worker pool size.
+- `OURO_MODEL` (default `anthropic/claude-sonnet-4.6`) — main reasoning model.
+- `OURO_MODEL_CODE` (default `anthropic/claude-opus-4.6`) — code editing model.
+- `OURO_MODEL_LIGHT` (default `google/gemini-3-pro-preview`) — background consciousness model.
+- `OURO_SOFT_TIMEOUT_SEC` (default 600) — warning threshold.
+- `OURO_HARD_TIMEOUT_SEC` (default 1800) — kill threshold.
+- `OURO_BG_BUDGET_PCT` (default 10) — consciousness budget as % of total.
 
-**Branches**: `OUROBOROS_BRANCH_PREFIX` = dev branch name. Stable markers are git tags (`stable-YYYYMMDD-HHMMSS`).
+**Branches**: `OURO_BRANCH_PREFIX` = dev branch name. Stable markers are git tags (`stable-YYYYMMDD-HHMMSS`).
 
 **Docker**: Python 3.12-slim, Node.js 22 LTS, Playwright Chromium, tini entrypoint, 1 CPU / 2 GB RAM.

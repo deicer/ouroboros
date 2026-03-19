@@ -1,4 +1,4 @@
-# Ouroboros — common development commands
+# Ouro — common development commands
 # Usage: make test, make lint, make health
 
 .PHONY: test test-v test-e2e health clean
@@ -11,24 +11,24 @@ test:
 test-v:
 	python3 -m pytest tests/ -v --tb=long --ignore=tests/e2e
 
-# Run codebase health check (requires ouroboros importable)
+# Run codebase health check (requires ouro importable)
 health:
-	python3 -c "from ouroboros.review import compute_complexity_metrics; \
+	python3 -c "from ouro.review import compute_complexity_metrics; \
 		import pathlib, json; \
 		m = compute_complexity_metrics(pathlib.Path('.')); \
 		print(json.dumps(m, indent=2, default=str))"
 
 # E2E tests (requires API keys in .env, runs in Docker)
 test-e2e:
-	docker build -t ouroboros-e2e -f tests/e2e/Dockerfile .
+	docker build -t ouro-e2e -f tests/e2e/Dockerfile .
 	docker run --rm --env-file .env \
-		-e OUROBOROS_MAX_ROUNDS=30 \
-		-e OUROBOROS_MODEL=anthropic/claude-sonnet-4 \
+		-e OURO_MAX_ROUNDS=30 \
+		-e OURO_MODEL=anthropic/claude-sonnet-4 \
 		-e GITHUB_TOKEN=dummy \
 		-e GITHUB_USER=dummy \
 		-e GITHUB_REPO=dummy \
 		-e TELEGRAM_BOT_TOKEN=dummy \
-		ouroboros-e2e
+		ouro-e2e
 
 # Clean Python cache files
 clean:

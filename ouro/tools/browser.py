@@ -23,7 +23,7 @@ try:
 except ImportError:
     _HAS_STEALTH = False
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouro.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
 

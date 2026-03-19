@@ -29,7 +29,7 @@ from supervisor.telegram import send_with_budget
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
-REPO_DIR: pathlib.Path = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "/app"))
+REPO_DIR: pathlib.Path = pathlib.Path(os.environ.get("OURO_REPO_DIR", "/app"))
 DRIVE_ROOT: pathlib.Path = pathlib.Path(os.environ.get("DRIVE_ROOT", "/data"))
 MAX_WORKERS: int = 5
 SOFT_TIMEOUT_SEC: int = 600
@@ -45,7 +45,7 @@ _SPAWN_GRACE_SEC: float = 15.0  # workers need a few seconds to init
 # Since launcher has top-level side effects, this causes worker child crashes (exitcode=1).
 # Use "fork" by default on Linux; allow override via env.
 _DEFAULT_WORKER_START_METHOD = "fork" if sys.platform.startswith("linux") else "spawn"
-_WORKER_START_METHOD = str(os.environ.get("OUROBOROS_WORKER_START_METHOD", _DEFAULT_WORKER_START_METHOD) or _DEFAULT_WORKER_START_METHOD).strip().lower()
+_WORKER_START_METHOD = str(os.environ.get("OURO_WORKER_START_METHOD", _DEFAULT_WORKER_START_METHOD) or _DEFAULT_WORKER_START_METHOD).strip().lower()
 if _WORKER_START_METHOD not in {"fork", "spawn", "forkserver"}:
     _WORKER_START_METHOD = _DEFAULT_WORKER_START_METHOD
 
@@ -121,7 +121,7 @@ def _get_chat_agent():
     global _chat_agent
     if _chat_agent is None:
         sys.path.insert(0, str(REPO_DIR))
-        from ouroboros.agent import make_agent
+        from ouro.agent import make_agent
         _chat_agent = make_agent(
             repo_dir=str(REPO_DIR),
             drive_root=str(DRIVE_ROOT),
@@ -272,7 +272,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     _sys.path.insert(0, repo_dir)
     _drive = _pathlib.Path(drive_root)
     try:
-        from ouroboros.agent import make_agent
+        from ouro.agent import make_agent
         agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     except Exception as _e:
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())

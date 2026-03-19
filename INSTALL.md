@@ -1,12 +1,12 @@
 # Installation Guide
 
-Deploy Ouroboros on a VPS using Claude Code.
+Deploy Ouro on a VPS using Claude Code.
 
 ---
 
 ## VPS Requirements
 
-Ouroboros runs Python + Chromium (Playwright) + Claude Code CLI (Node.js) inside Docker. Chromium is the biggest memory consumer at 800 MB–1.5 GB per browser tab.
+Ouro runs Python + Chromium (Playwright) + Claude Code CLI (Node.js) inside Docker. Chromium is the biggest memory consumer at 800 MB–1.5 GB per browser tab.
 
 | Tier | RAM | vCPU | Disk | Monthly cost (approx) |
 |------|-----|------|------|-----------------------|
@@ -31,7 +31,7 @@ Ubuntu 22.04+ or Debian 12+ recommended. Any Linux with Docker support works.
 Before starting, you need:
 
 1. **A VPS** with SSH access (see specs above)
-2. **A GitHub fork** of this repository — Ouroboros pushes commits to its own repo, so it needs a fork
+2. **A GitHub fork** of this repository — Ouro pushes commits to its own repo, so it needs a fork
 3. **API keys** — see the table below
 4. **Claude Code** with SSH access to the VPS
 
@@ -72,8 +72,8 @@ docker compose version
 ### 2. Clone the Fork
 
 ```bash
-git clone https://github.com/<GITHUB_USER>/ouroboros.git
-cd ouroboros
+git clone https://github.com/<GITHUB_USER>/ouro.git
+cd ouro
 ```
 
 Replace `<GITHUB_USER>` with the GitHub username that owns the fork.
@@ -91,7 +91,7 @@ OPENROUTER_API_KEY=sk-or-...
 TELEGRAM_BOT_TOKEN=123456:ABC...
 GITHUB_TOKEN=github_pat_...
 GITHUB_USER=<your-github-username>
-GITHUB_REPO=ouroboros
+GITHUB_REPO=ouro
 ANTHROPIC_API_KEY=sk-ant-...
 COMPOSIO_API_KEY=...
 ```
@@ -135,7 +135,7 @@ Look for:
 
 ### 7. Connect via Telegram
 
-Open the Telegram bot you created and send any message. The first person to message becomes the **owner**. Ouroboros will check its subsystems and introduce itself.
+Open the Telegram bot you created and send any message. The first person to message becomes the **owner**. Ouro will check its subsystems and introduce itself.
 
 ---
 
@@ -166,7 +166,7 @@ No manual initialization needed beyond getting Docker running with the right `.e
 | Start | `docker compose up -d` |
 | Rebuild | `docker compose up -d --build` |
 
-The container auto-restarts on failure. All state persists in a Docker volume (`ouroboros-data`) — survives restarts and rebuilds.
+The container auto-restarts on failure. All state persists in a Docker volume (`ouro-data`) — survives restarts and rebuilds.
 
 Telegram commands: `/status`, `/restart`, `/panic`, `/break`, `/budget`, `/rollback`.
 
@@ -178,7 +178,7 @@ Telegram commands: `/status`, `/restart`, `/panic`, `/break`, `/budget`, `/rollb
 Check logs with `docker compose logs`. Usually a missing or invalid API key in `.env`.
 
 **Out of memory (OOM killed):**
-Increase `mem_limit` in `docker-compose.yml`. Chromium needs 1+ GB. Check with `docker inspect ouroboros-ouroboros-1 | grep OOMKilled`.
+Increase `mem_limit` in `docker-compose.yml`. Chromium needs 1+ GB. Check with `docker inspect ouro-ouro-1 | grep OOMKilled`.
 
 **Playwright/browser failures:**
 Ensure `mem_limit` is at least 3 GB. Chromium won't launch under heavy memory pressure.

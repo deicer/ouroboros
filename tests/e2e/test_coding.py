@@ -10,14 +10,14 @@ from tests.e2e.harness import E2EHarness, git_diff_from_initial
 
 def _load_modified_send_owner_message(repo_dir):
     """Load _send_owner_message from the agent's modified control.py."""
-    control_path = repo_dir / "ouroboros" / "tools" / "control.py"
+    control_path = repo_dir / "ouro" / "tools" / "control.py"
     source = control_path.read_text()
 
     # Load as an isolated module so it doesn't pollute the real one
     spec = importlib.util.spec_from_file_location("_e2e_control", str(control_path))
     mod = importlib.util.module_from_spec(spec)
 
-    # Provide ouroboros.tools.registry and ouroboros.utils so the module can import
+    # Provide ouro.tools.registry and ouro.utils so the module can import
     mod.__dict__["__builtins__"] = __builtins__
     sys.modules["_e2e_control"] = mod
     spec.loader.exec_module(mod)

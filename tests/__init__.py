@@ -1,1 +1,1 @@
-# Ouroboros test suite
+# Ouro test suite

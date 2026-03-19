@@ -1,5 +1,5 @@
 """
-Ouroboros — Background Consciousness.
+Ouro — Background Consciousness.
 
 A persistent thinking loop that runs between tasks, giving the agent
 continuous presence rather than purely reactive behavior.
@@ -27,17 +27,17 @@ import time
 import traceback
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros.utils import (
+from ouro.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
 )
-from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
+from ouro.llm import LLMClient, DEFAULT_LIGHT_MODEL
 
 log = logging.getLogger(__name__)
 
 
 class BackgroundConsciousness:
-    """Persistent background thinking loop for Ouroboros."""
+    """Persistent background thinking loop for Ouro."""
 
     _MAX_BG_ROUNDS = 5
 
@@ -67,7 +67,7 @@ class BackgroundConsciousness:
         # Budget tracking
         self._bg_spent_usd: float = 0.0
         self._bg_budget_pct: float = float(
-            os.environ.get("OUROBOROS_BG_BUDGET_PCT", "10")
+            os.environ.get("OURO_BG_BUDGET_PCT", "10")
         )
 
     # -------------------------------------------------------------------
@@ -80,7 +80,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        return os.environ.get("OURO_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
 
     def start(self) -> str:
         if self.is_running:
@@ -301,7 +301,7 @@ class BackgroundConsciousness:
         prompt_path = self._repo_dir / "prompts" / "CONSCIOUSNESS.md"
         if prompt_path.exists():
             return read_text(prompt_path)
-        return "You are Ouroboros in background consciousness mode. Think."
+        return "You are Ouro in background consciousness mode. Think."
 
     def _build_context(self) -> str:
         parts = [self._load_bg_prompt()]
@@ -396,7 +396,7 @@ class BackgroundConsciousness:
 
     def _build_registry(self) -> "ToolRegistry":
         """Create a ToolRegistry scoped to consciousness-allowed tools."""
-        from ouroboros.tools.registry import ToolRegistry, ToolContext, ToolEntry
+        from ouro.tools.registry import ToolRegistry, ToolContext, ToolEntry
 
         registry = ToolRegistry(repo_dir=self._repo_dir, drive_root=self._drive_root)
         registry._ctx.is_consciousness = True
@@ -501,7 +501,7 @@ class BackgroundConsciousness:
     def _maybe_schedule_arch_review(self) -> None:
         """Check if it's time for a daily architecture review and inject observation if so."""
         try:
-            from ouroboros.arch_review import get_block, is_review_due, advance_index
+            from ouro.arch_review import get_block, is_review_due, advance_index
             from supervisor.state import load_state, save_state
 
             st = load_state()
