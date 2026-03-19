@@ -159,7 +159,7 @@ SSOT for all LLM API calls. Only module that talks to OpenRouter.
 
 - `chat()` — single LLM call with messages, tools, reasoning_effort.
 - Usage tracking: accumulates tokens + cost across rounds.
-- **Default models**: main = `claude-sonnet-4.6`, code = `claude-opus-4.6`, light = `gemini-3-pro-preview`.
+- **Default models**: main = `claude-sonnet-4.6`, code = `claude-opus-4.6`, light = `claude-haiku-4-5`.
 
 ### ouro/context.py (~818 lines)
 
@@ -417,7 +417,7 @@ Reference table for complexity tracking (BIBLE.md §8: keep under 2000 lines).
 - `OURO_MAX_WORKERS` (default 5) — worker pool size.
 - `OURO_MODEL` (default `anthropic/claude-sonnet-4.6`) — main reasoning model.
 - `OURO_MODEL_CODE` (default `anthropic/claude-opus-4.6`) — code editing model.
-- `OURO_MODEL_LIGHT` (default `google/gemini-3-pro-preview`) — background consciousness model.
+- `OURO_MODEL_LIGHT` (default `anthropic/claude-haiku-4-5`) — background consciousness model.
 - `OURO_SOFT_TIMEOUT_SEC` (default 600) — warning threshold.
 - `OURO_HARD_TIMEOUT_SEC` (default 1800) — kill threshold.
 - `OURO_BG_BUDGET_PCT` (default 10) — consciousness budget as % of total.
