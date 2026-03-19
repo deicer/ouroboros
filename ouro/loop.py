@@ -12,6 +12,7 @@ import os
 import pathlib
 import queue
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -472,27 +473,17 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
     return tool_schemas, enabled_extra
 
 
-def _drain_incoming_messages(
+def _drain_drive_mailbox(
     messages: List[Dict[str, Any]],
-    incoming_messages: queue.Queue,
     drive_root: Optional[pathlib.Path],
     task_id: str,
     event_queue: Optional[queue.Queue],
     _owner_msg_seen: set,
 ) -> None:
     """
-    Inject owner messages received during task execution.
-    Drains both the in-process queue and the Drive mailbox.
+    Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool).
+    Used by worker tasks to receive forwarded messages.
     """
-    # Inject owner messages received during task execution
-    while not incoming_messages.empty():
-        try:
-            injected = incoming_messages.get_nowait()
-            messages.append({"role": "user", "content": injected})
-        except queue.Empty:
-            break
-
-    # Drain per-task owner messages from Drive mailbox (written by forward_to_worker tool)
     if drive_root is not None and task_id:
         from ouro.owner_inject import drain_owner_messages
         drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
@@ -501,7 +492,6 @@ def _drain_incoming_messages(
                 "role": "user",
                 "content": f"[Owner message during task]: {dmsg}",
             })
-            # Log for duplicate processing detection (health invariant #5)
             if event_queue is not None:
                 try:
                     event_queue.put_nowait({
@@ -519,13 +509,13 @@ def run_llm_loop(
     llm: LLMClient,
     drive_logs: pathlib.Path,
     emit_progress: Callable[[str], None],
-    incoming_messages: queue.Queue,
     task_type: str = "",
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
     event_queue: Optional[queue.Queue] = None,
     initial_effort: str = "medium",
     drive_root: Optional[pathlib.Path] = None,
+    break_event: Optional["threading.Event"] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -536,6 +526,7 @@ def run_llm_loop(
     Args:
         budget_remaining_usd: If set, forces completion when task cost exceeds 50% of this budget
         initial_effort: Initial reasoning effort level (default "medium")
+        break_event: If set, checked between rounds — when signaled, asks LLM to stop
 
     Returns: (final_text, accumulated_usage, llm_trace)
     """
@@ -599,8 +590,13 @@ def run_llm_loop(
                 active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
                 ctx.active_effort_override = None
 
-            # Inject owner messages (in-process queue + Drive mailbox)
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            # Check for break request
+            if break_event is not None and break_event.is_set():
+                messages.append({"role": "system", "content": "[BREAK] User requested /break — stop current task immediately. Give your final response now."})
+                break_event.clear()
+
+            # Drain per-task owner messages from Drive mailbox (for worker tasks)
+            _drain_drive_mailbox(messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
             # Compact old tool history when needed
             # Check for LLM-requested compaction first (via compact_context tool)
@@ -677,8 +673,8 @@ def run_llm_loop(
                 messages, llm_trace, emit_progress
             )
 
-            # Drain owner messages injected during tool execution
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            # Drain per-task owner messages from Drive mailbox (for worker tasks)
+            _drain_drive_mailbox(messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
             # --- Budget guard ---
             # LLM decides when to stop (Bible P0, P3). We only enforce hard budget limit.

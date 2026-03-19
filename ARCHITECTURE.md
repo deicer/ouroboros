@@ -39,7 +39,7 @@ Four execution contexts, each with a distinct role:
 
 **Main worker** — the workhorse. Handles everything the user asks for: tasks, code edits, reviews, subtasks. Up to `MAX_WORKERS` (5) parallel processes. Medium reasoning effort for regular tasks, high for reviews.
 
-**Direct chat** — fast path for conversation. Runs in the supervisor thread (not a worker process) when no task is active. Same capabilities as main worker, just no queue delay.
+**Direct chat** — fast path for conversation. Runs in a daemon thread (not a worker process). Messages are queued in `_pending_messages` and dispatched one at a time when the agent is free. Same capabilities as main worker, just no queue delay.
 
 **Consciousness** — the night watchman. Daemon thread that wakes periodically to check system health, update memory, notice loose ends, and schedule maintenance. Runs on a light model with limited tools (no code editing, no shell). Pauses when a main task is running. Budget capped at 10%.
 
@@ -51,21 +51,21 @@ Four execution contexts, each with a distinct role:
 
 Process management, Telegram interface, task lifecycle, state persistence, git operations.
 
-### launcher.py (~833 lines)
+### launcher.py (~759 lines)
 
 Main entry point. Runs the boot sequence, then enters an infinite main loop:
 
 - **Boot**: load env → init state → init Telegram → git bootstrap → safe_restart → first-run init → spawn workers → restore queue → auto-resume → start consciousness → main loop.
-- **Main loop**: adaptive Telegram polling (fast when active, 10s when idle) → message batching (1.5s burst window) → classify as supervisor command / conversation / task → dispatch.
+- **Main loop**: adaptive Telegram polling (fast when active, 10s when idle) → classify as supervisor command or conversation → queue all messages in `_pending_messages` → dispatch one at a time when agent is free.
 - **Supervisor commands**: `/status`, `/break`, `/panic`, `/restart`, `/review`, `/evolve`, `/no-approve`, `/bg`, `/budget`, `/rollback`.
 - **Chat watchdog**: monitors direct-chat thread for hangs, enforces timeouts.
 
-### supervisor/workers.py (~555 lines)
+### supervisor/workers.py (~540 lines)
 
 Worker pool management. Up to `MAX_WORKERS` (default 5) processes.
 
 - `worker_main()` — each worker is an isolated process with its own Agent and ToolRegistry.
-- `handle_chat_direct()` — fast path for conversational messages (bypasses queue, runs in thread).
+- `handle_chat_direct()` — fast path for conversational messages (bypasses queue, runs in thread). Processes one message per call.
 - `assign_tasks()` — drains PENDING queue into available workers.
 - `auto_resume_after_restart()` — resumes interrupted RUNNING tasks after restart.
 - Module state: `WORKERS` dict, `PENDING` list, `RUNNING` dict, protected by `_queue_lock`.
@@ -138,16 +138,16 @@ Event dispatcher. Workers communicate with supervisor exclusively through a mult
 
 Per-worker agent instance. Each worker process creates its own Agent with independent state.
 
-### ouro/agent.py (~664 lines)
+### ouro/agent.py (~661 lines)
 
 Per-worker orchestrator. Created fresh in each worker process.
 
 - `handle_task()` — main entry: load task → build context → run LLM loop → collect events → return result.
-- `inject_message()` — thread-safe queue for owner messages arriving while I'm busy.
+- `request_break()` — thread-safe: signals the agent to stop its current task.
 - Restart verification: after code push, verifies new worker loads correct git SHA.
 - Auto-rescue: detects and commits uncommitted changes on startup.
 
-### ouro/loop.py (~920 lines) — largest module
+### ouro/loop.py (~916 lines) — largest module
 
 Core LLM tool execution loop. This is my thinking-acting cycle.
 
@@ -298,10 +298,10 @@ All persistent state lives on the `/data/` volume. No database — only files wi
 ### User Message → Response
 
 ```
-Telegram poll → launcher.py → batch (1.5s window)
+Telegram poll → launcher.py
   → supervisor command?  → execute directly
-  → agent busy?          → inject_message() into running task
-  → free                 → handle_chat_direct() in thread
+  → all messages         → append to _pending_messages queue
+  → agent free?          → pop next, handle_chat_direct() in thread
   → queued task          → enqueue → assign to worker
 ```
 
@@ -398,12 +398,12 @@ Reference table for complexity tracking (BIBLE.md §8: keep under 2000 lines).
 
 | Module | Lines | Status |
 |--------|-------|--------|
-| ouro/loop.py | ~920 | OK |
+| ouro/loop.py | ~916 | OK |
 | ouro/context.py | ~818 | OK |
-| launcher.py | ~833 | OK |
-| ouro/agent.py | ~664 | OK |
+| launcher.py | ~759 | OK |
+| ouro/agent.py | ~661 | OK |
 | supervisor/state.py | ~600 | OK |
-| supervisor/workers.py | ~555 | OK |
+| supervisor/workers.py | ~540 | OK |
 | ouro/consciousness.py | ~525 | OK |
 | supervisor/telegram.py | ~591 | OK |
 | supervisor/events.py | ~570 | OK |

@@ -13,7 +13,6 @@ import datetime
 import json
 import multiprocessing as mp
 import os
-import queue as _queue_mod
 import pathlib
 import sys
 import threading
@@ -135,43 +134,29 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
                        message_id: Optional[int] = None) -> None:
     try:
         agent = _get_chat_agent()
-        while True:
-            task = {
-                "id": uuid.uuid4().hex[:8],
-                "type": "task",
-                "chat_id": chat_id,
-                "text": text,
-                "message_id": message_id,
-                "_is_direct_chat": True,
-            }
-            if image_data:
-                # image_data is (base64, mime) or (base64, mime, caption)
-                task["image_base64"] = image_data[0]
-                task["image_mime"] = image_data[1]
-                if len(image_data) > 2 and image_data[2]:
-                    task["image_caption"] = image_data[2]
-                    # Prefer caption as task text if text is empty
-                    if not text:
-                        task["text"] = image_data[2]
-            # Fallback for truly empty messages
-            if not task["text"]:
-                task["text"] = "(image attached)" if image_data else ""
-            events = agent.handle_task(task)
-            for e in events:
-                get_event_q().put(e)
-
-            # Collect messages that arrived during the task
-            leftover = []
-            while not agent._incoming_messages.empty():
-                try:
-                    leftover.append(agent._incoming_messages.get_nowait())
-                except _queue_mod.Empty:
-                    break
-            if not leftover:
-                break
-            text = "\n\n".join(leftover)
-            image_data = None
-            message_id = None  # subsequent messages don't reply to original
+        task = {
+            "id": uuid.uuid4().hex[:8],
+            "type": "task",
+            "chat_id": chat_id,
+            "text": text,
+            "message_id": message_id,
+            "_is_direct_chat": True,
+        }
+        if image_data:
+            # image_data is (base64, mime) or (base64, mime, caption)
+            task["image_base64"] = image_data[0]
+            task["image_mime"] = image_data[1]
+            if len(image_data) > 2 and image_data[2]:
+                task["image_caption"] = image_data[2]
+                # Prefer caption as task text if text is empty
+                if not text:
+                    task["text"] = image_data[2]
+        # Fallback for truly empty messages
+        if not task["text"]:
+            task["text"] = "(image attached)" if image_data else ""
+        events = agent.handle_task(task)
+        for e in events:
+            get_event_q().put(e)
     except Exception as e:
         import traceback
         err_msg = f"⚠️ Error: {type(e).__name__}: {e}"

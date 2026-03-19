@@ -5,7 +5,7 @@
 
 A self-developing AI agent that writes its own code, improves itself, and maintains persistent identity across restarts.
 
-**Template version:** 1.5.0
+**Template version:** 1.6.0
 
 ---
 

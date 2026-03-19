@@ -447,10 +447,9 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
         return f"[Supervisor handled /bg {action}]\n"
 
     if lowered.startswith("/break"):
-        # Cancel current task by injecting a stop message
         agent = _get_chat_agent()
         if agent._busy:
-            agent.inject_message("[BREAK] User requested /break — stop current task immediately.")
+            agent.request_break()
             send_with_budget(chat_id, "\u23f9 Break: sent stop signal to current task.")
         else:
             send_with_budget(chat_id, "\u2705 No task is running.")
@@ -511,6 +510,10 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
 
     return ""
 
+
+# Sequential message queue: messages are processed one at a time
+_pending_messages: List[Tuple[int, str, Any, Any]] = []  # [(chat_id, text, image_data, message_id)]
+_pending_lock = threading.Lock()
 
 offset = int(load_state().get("tg_offset") or 0)
 _last_diag_heartbeat_ts = 0.0
@@ -677,117 +680,40 @@ while True:
             except Exception:
                 log.warning("Supervisor command handler error", exc_info=True)
 
-        # All other messages (and dual-path commands) -> direct chat with Ouro
+        # All other messages (and dual-path commands) -> queue for sequential processing
         if not text and not image_data:
             continue  # empty message, skip
 
-        # Consciousness pauses during task handling (see _run_task_and_resume below)
+        with _pending_lock:
+            _pending_messages.append((chat_id, text, image_data, user_message_id))
 
-        agent = _get_chat_agent()
+    # Dispatch next pending message if chat agent is free
+    _next_msg = None
+    agent = _get_chat_agent()
+    if not agent._busy:
+        with _pending_lock:
+            if _pending_messages:
+                _next_msg = _pending_messages.pop(0)
+    if _next_msg is not None:
+        _nm_chat_id, _nm_text, _nm_image, _nm_mid = _next_msg
+        _consciousness.pause()
 
-        if agent._busy:
-            # BUSY PATH: inject into active conversation (single consumer)
-            if image_data:
-                if text:
-                    agent.inject_message(text)
-                send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
-            elif text:
-                agent.inject_message(text)
+        def _run_task_and_resume(cid, txt, img, mid):
+            try:
+                handle_chat_direct(cid, txt, img, message_id=mid)
+            finally:
+                _consciousness.resume()
 
-        else:
-            # FREE PATH: batch-collect burst messages, then dispatch (single consumer)
-            # Batch-collect burst messages: wait briefly for follow-up messages
-            # This prevents "do X" -> "cancel" race conditions
-            _BATCH_WINDOW_SEC = 1.5  # collect messages for 1500ms
-            _EARLY_EXIT_SEC = 0.15   # if no burst within 150ms -> dispatch immediately
-            _batch_start = time.time()
-            _batch_deadline = _batch_start + _BATCH_WINDOW_SEC
-            _batched_texts = [text] if text else []
-            _batched_image = image_data  # keep first image
-
-            _batch_state = load_state()
-            _batch_state_dirty = False
-            while time.time() < _batch_deadline:
-                time.sleep(0.1)
-                try:
-                    _extra_updates = TG.get_updates(offset=offset, timeout=0) or []
-                except Exception:
-                    _extra_updates = []
-                if not _extra_updates and (time.time() - _batch_start) < _EARLY_EXIT_SEC:
-                    # No follow-up messages in first 150ms -> single message, dispatch immediately
-                    break
-                for _upd in _extra_updates:
-                    offset = max(offset, int(_upd.get("update_id", offset - 1)) + 1)
-                    _msg2 = _upd.get("message") or _upd.get("edited_message") or {}
-                    _uid2 = (_msg2.get("from") or {}).get("id")
-                    _cid2 = (_msg2.get("chat") or {}).get("id")
-                    _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
-                    if _uid2 and _batch_state.get("owner_id") and _uid2 == int(_batch_state["owner_id"]):
-                        log_chat("in", _cid2, _uid2, _txt2)
-                        _batch_state["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                        _batch_state_dirty = True
-                        # Handle supervisor commands in batch window
-                        if _txt2.strip().lower().startswith("/"):
-                            try:
-                                _cmd_result = _handle_supervisor_command(_txt2, _cid2, tg_offset=offset)
-                                if _cmd_result is True:
-                                    continue  # terminal command, don't batch
-                                elif _cmd_result:
-                                    _txt2 = _cmd_result + _txt2  # dual-path: prepend note
-                            except SystemExit:
-                                raise
-                            except Exception:
-                                log.warning("Supervisor command in batch failed", exc_info=True)
-                        if _txt2:
-                            _batched_texts.append(_txt2)
-                            _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
-                        if not _batched_image:
-                            _doc2 = _msg2.get("document") or {}
-                            _photo2 = (_msg2.get("photo") or [None])[-1] or {}
-                            _fid2 = _photo2.get("file_id") or _doc2.get("file_id")
-                            if _fid2:
-                                _b642, _mime2 = TG.download_file_base64(_fid2)
-                                if _b642:
-                                    _batched_image = (_b642, _mime2, _txt2)
-
-            # Save state once if mutated during batch window
-            if _batch_state_dirty:
-                save_state(_batch_state)
-
-            # Merge all batched texts into one message
-            if len(_batched_texts) > 1:
-                final_text = "\n\n".join(_batched_texts)
-                log.info("Message batch: %d messages merged into one", len(_batched_texts))
-            elif _batched_texts:
-                final_text = _batched_texts[0]
-            else:
-                final_text = text  # fallback to original
-
-            # Re-check if agent became busy during batch window (race condition fix)
-            if agent._busy:
-                if final_text:
-                    agent.inject_message(final_text)
-                if _batched_image:
-                    send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
-            else:
-                # Dispatch to direct chat handler
-                _consciousness.pause()
-                def _run_task_and_resume(cid, txt, img, mid):
-                    try:
-                        handle_chat_direct(cid, txt, img, message_id=mid)
-                    finally:
-                        _consciousness.resume()
-                # Use first message's message_id for batched messages
-                _t = threading.Thread(
-                    target=_run_task_and_resume,
-                    args=(chat_id, final_text, _batched_image, user_message_id),
-                    daemon=True,
-                )
-                try:
-                    _t.start()
-                except Exception as _te:
-                    log.error("Failed to start chat thread: %s", _te)
-                    _consciousness.resume()  # ensure resume if thread fails to start
+        _t = threading.Thread(
+            target=_run_task_and_resume,
+            args=(_nm_chat_id, _nm_text, _nm_image, _nm_mid),
+            daemon=True,
+        )
+        try:
+            _t.start()
+        except Exception as _te:
+            log.error("Failed to start chat thread: %s", _te)
+            _consciousness.resume()
 
     st = load_state()
     st["tg_offset"] = offset

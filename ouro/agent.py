@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import pathlib
-import queue
 import threading
 import time
 import traceback
@@ -73,11 +72,10 @@ class OuroAgent:
         self._current_task_id: Optional[str] = None
         self._current_task_type: Optional[str] = None
 
-        # Message injection: owner can send messages while agent is busy
-        self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
         self._last_progress_ts: float = 0.0
         self._task_started_ts: float = 0.0
+        self._break_requested = threading.Event()
 
         # SSOT modules
         self.llm = LLMClient()
@@ -86,9 +84,9 @@ class OuroAgent:
 
         self._log_worker_boot_once()
 
-    def inject_message(self, text: str) -> None:
-        """Thread-safe: inject owner message into the active conversation."""
-        self._incoming_messages.put(text)
+    def request_break(self) -> None:
+        """Thread-safe: request the agent to stop its current task."""
+        self._break_requested.set()
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged
@@ -375,6 +373,7 @@ class OuroAgent:
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._busy = True
+        self._break_requested.clear()
         start_time = time.time()
         self._task_started_ts = start_time
         self._last_progress_ts = start_time
@@ -409,13 +408,13 @@ class OuroAgent:
                     llm=self.llm,
                     drive_logs=drive_logs,
                     emit_progress=self._emit_progress,
-                    incoming_messages=self._incoming_messages,
                     task_type=task_type_str,
                     task_id=str(task.get("id") or ""),
                     budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
                     initial_effort=initial_effort,
                     drive_root=self.env.drive_root,
+                    break_event=self._break_requested,
                 )
             except Exception as e:
                 tb = traceback.format_exc()
@@ -443,8 +442,6 @@ class OuroAgent:
             except Exception:
                 log.debug("Failed to cleanup browser", exc_info=True)
                 pass
-            # NOTE: do NOT drain _incoming_messages here — leftover messages
-            # are collected by handle_chat_direct and dispatched as a new task.
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_id = None
