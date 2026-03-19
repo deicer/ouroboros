@@ -597,17 +597,20 @@ while True:
             st["last_owner_message_at"] = now_iso
             save_state(st)
             log_chat("in", chat_id, user_id, text)
-            # Replace user's text with onboarding prompt — falls through to handle_chat_direct
-            text = (
-                "[SYSTEM] Владелец только что зарегистрировался. Это твой первый контакт. "
-                "Выполни два шага:\n"
-                "1. Проверь подсистемы и отчитайся: OpenRouter (бюджет), GitHub (доступ), "
-                "Composio (подключения). Telegram уже работает.\n"
-                "2. Представься: кто ты, какая у тебя цель, что умеешь, как с тобой общаться. "
-                "Будь живым и настоящим, не шаблонным."
-            )
-            image_data = None  # clear any image from registration message
-            # Don't continue — let text fall through to agent dispatch below
+            # Onboarding: two separate messages — systems check, then welcome
+            _consciousness.pause()
+            try:
+                handle_chat_direct(chat_id, (
+                    "[SYSTEM] Владелец только что зарегистрировался. Это твой первый контакт. "
+                    "Проверь все доступные подсистемы и отчитайся о их состоянии."
+                ))
+                handle_chat_direct(chat_id, (
+                    "[SYSTEM] Теперь представься владельцу: кто ты, какая у тебя цель, что умеешь, "
+                    "как с тобой общаться. Будь живым и настоящим, не шаблонным."
+                ))
+            finally:
+                _consciousness.resume()
+            continue  # onboarding fully handled, skip normal dispatch
 
         if user_id != int(st.get("owner_id")):
             continue
