@@ -224,6 +224,11 @@ When a task matches an installed skill's description, activate it first.
 2. `repo_commit_push` — commit and push changes made by `claude_code_edit`.
 3. `request_restart` — ONLY after a successful push.
 
+**Rule:** Any task that edits and pushes code MUST call `request_restart` afterward.
+Without restart the running process keeps using old code. This applies to all
+task types — evolution, subtasks, cron, regular. After restart, interrupted tasks
+auto-resume.
+
 ### Task Decomposition
 
 For complex tasks (>5 steps or >1 logical domain) — **decompose**:
