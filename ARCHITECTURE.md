@@ -26,6 +26,27 @@ Playwright/Chromium, tini (PID 1). Resource limits: 1 CPU, 2 GB RAM.
 
 ---
 
+## Process Architecture
+
+Four execution contexts, each with a distinct role:
+
+| Process | Role | Model | Prompt | Tools | Trigger |
+|---------|------|-------|--------|-------|---------|
+| **Main worker** | Handle user tasks, reviews, scheduled work | Main (Sonnet) | SYSTEM.md | All ~57 | Task queue |
+| **Direct chat** | Immediate conversational response | Main (Sonnet) | SYSTEM.md | All ~57 | Telegram message when idle |
+| **Consciousness** | System caretaker — health checks, routine maintenance, gentle reflection | Light (Haiku) | CONSCIOUSNESS.md | 18 whitelisted (read-only + memory) | Periodic wakeup (default 5 min) |
+| **Evolution** | Daily self-improvement — find leverage, implement one meaningful change | Main (Sonnet), high effort | SYSTEM.md | All ~57 | Once per day (when queue empty) |
+
+**Main worker** — the workhorse. Handles everything the user asks for: tasks, code edits, reviews, subtasks. Up to `MAX_WORKERS` (5) parallel processes. Medium reasoning effort for regular tasks, high for reviews.
+
+**Direct chat** — fast path for conversation. Runs in the supervisor thread (not a worker process) when no task is active. Same capabilities as main worker, just no queue delay.
+
+**Consciousness** — the night watchman. Daemon thread that wakes periodically to check system health, update memory, notice loose ends, and schedule maintenance. Runs on a light model with limited tools (no code editing, no shell). Pauses when a main task is running. Budget capped at 10%.
+
+**Evolution** — the growth engine. Runs once per day as a task type with high reasoning effort. Reads the codebase, finds the point of maximum leverage, implements one coherent transformation, tests it, commits. Circuit breaker pauses after 3 consecutive failures. Budget guard at $50 remaining.
+
+---
+
 ## Layer 1 — Supervisor
 
 Process management, Telegram interface, task lifecycle, state persistence, git operations.
