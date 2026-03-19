@@ -610,7 +610,7 @@ while True:
             st["owner_chat_id"] = chat_id
             st["last_owner_message_at"] = now_iso
             save_state(st)
-            send_with_budget(chat_id, "✅ Owner registered.")
+            send_with_budget(chat_id, "✅ Owner registered. Please wait for Ouro to wake up...")
             log_chat("in", chat_id, user_id, text)
             # Onboarding: two separate messages — systems check, then welcome
             _consciousness.pause()
