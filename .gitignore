@@ -10,6 +10,9 @@
 .vscode/
 .idea/
 
+# Claude Code
+.claude/settings.local.json
+
 # Python
 .venv/
 venv/
