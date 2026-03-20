@@ -77,7 +77,8 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
     counter = status["counter"]
     status["last_body"] = text[:180] if text else "thinking…"
     spinner = _SPINNER_FRAMES[status.get("frame", 0) % len(_SPINNER_FRAMES)]
-    new_text = f"{spinner} _{text[:180]}_ · {counter}" if text else spinner
+    safe_body = text[:180].replace("_", "\\_") if text else "thinking…"
+    new_text = f"{spinner} _{safe_body}_ · {counter}" if text else spinner
     now = time.time()
     if now - status["last_edit_ts"] < 0.4:
         status["last_text"] = new_text  # store for lazy flush
@@ -111,7 +112,8 @@ def tick_status_animations(ctx: Any) -> None:
         spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
         counter = status.get("counter", 0)
         body = status.get("last_body") or "thinking…"
-        new_text = f"{spinner} _{body}_ · {counter}"
+        safe_body = body.replace("_", "\\_")
+        new_text = f"{spinner} _{safe_body}_ · {counter}"
         # Always update timestamp to maintain debounce even on failure
         status["last_edit_ts"] = now
         try:

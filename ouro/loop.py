@@ -8,6 +8,7 @@ Extracted from agent.py to keep the agent thin.
 from __future__ import annotations
 
 import json
+from collections import Counter
 import os
 import pathlib
 import queue
@@ -265,8 +266,9 @@ def _handle_tool_calls(
     Returns: Number of errors encountered
     """
     # Emit tool names as progress so user sees what's happening
-    tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
-    emit_progress(", ".join(tool_names[:3]))
+    name_counts = Counter(tc.get("function", {}).get("name", "?") for tc in tool_calls)
+    parts = [f"{name} ×{count}" if count > 1 else name for name, count in name_counts.items()]
+    emit_progress(", ".join(parts[:3]))
 
     # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
     can_parallel = (
