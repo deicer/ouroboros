@@ -187,6 +187,16 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
 
         status = _STATUS_MESSAGES.get(task_id)
 
+        # Determine dispatch path for logging
+        if status and is_progress:
+            path = "progress"
+        elif status and not is_progress:
+            path = "status-delete"
+        else:
+            path = "normal"
+        log.info("_handle_send_message: task=%s, chat_id=%s, len=%d, is_progress=%s, path=%s",
+                 task_id, evt.get("chat_id"), len(str(evt.get("text") or "")), is_progress, path)
+
         # Progress messages: don't touch status, send independently
         if status and is_progress:
             ctx.send_with_budget(
@@ -202,6 +212,8 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         # Final message: delete status and send new independent message
         status = _STATUS_MESSAGES.pop(task_id, None)
         if status:
+            log.debug("Deleting status message %d before sending final reply for task %s",
+                       status["status_msg_id"], task_id)
             try:
                 ctx.TG.delete_message(status["chat_id"], status["status_msg_id"])
             except Exception:

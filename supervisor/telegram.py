@@ -87,6 +87,7 @@ class TelegramClient:
             except Exception as e:
                 last_err = repr(e)
             if attempt < 2:
+                log.debug("send_message retry %d/3: %s", attempt + 1, last_err)
                 import time
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
@@ -125,6 +126,7 @@ class TelegramClient:
             except Exception as e:
                 last_err = repr(e)
             if attempt < 2:
+                log.debug("send_message_reply retry %d/3: %s", attempt + 1, last_err)
                 import time
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err, None
@@ -157,6 +159,7 @@ class TelegramClient:
             except Exception as e:
                 last_err = repr(e)
             if attempt < 2:
+                log.debug("edit_message_text retry %d/3: %s", attempt + 1, last_err)
                 import time
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
@@ -196,6 +199,7 @@ class TelegramClient:
             except Exception as e:
                 last_err = repr(e)
             if attempt < 2:
+                log.debug("send_photo retry %d/3: %s", attempt + 1, last_err)
                 import time
                 time.sleep(0.8 * (attempt + 1))
         return False, last_err
@@ -427,6 +431,8 @@ def _send_markdown_telegram(chat_id: int, text: str,
     chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
     if not chunks:
         return False, "empty_chunks", None
+    if len(chunks) > 1:
+        log.debug("_send_markdown_telegram: splitting into %d chunks for chat_id=%s", len(chunks), chat_id)
     last_err = "ok"
     first_msg_id: Optional[int] = None
     for idx, md_part in enumerate(chunks):
@@ -439,6 +445,7 @@ def _send_markdown_telegram(chat_id: int, text: str,
             if ok:
                 first_msg_id = sent_id
             else:
+                log.warning("HTML parse failed for chunk %d, falling back to plain text: %s", idx, err)
                 plain = _strip_markdown(md_part)
                 if not plain.strip():
                     return False, err, None
@@ -450,6 +457,7 @@ def _send_markdown_telegram(chat_id: int, text: str,
         else:
             ok, err = tg.send_message(chat_id, _sanitize_telegram_text(html_text), parse_mode="HTML")
             if not ok:
+                log.warning("HTML parse failed for chunk %d, falling back to plain text: %s", idx, err)
                 plain = _strip_markdown(md_part)
                 if not plain.strip():
                     return False, err, first_msg_id
@@ -517,6 +525,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
                      is_progress: bool = False,
                      reply_to_message_id: Optional[int] = None) -> Optional[int]:
+    log.info("send_with_budget: chat_id=%d, len=%d, fmt=%s, is_progress=%s, reply_to=%s",
+             chat_id, len(text or ""), fmt or "plain", is_progress, reply_to_message_id)
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     # Progress messages go to progress.jsonl instead of chat.jsonl
@@ -545,7 +555,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     first_msg_id: Optional[int] = None
     if fmt == "markdown":
         ok, err, first_msg_id = _send_markdown_telegram(chat_id, full, reply_to_message_id=reply_to_message_id)
-        if not ok:
+        if ok:
+            log.info("send_with_budget: sent markdown, first_msg_id=%s", first_msg_id)
+        else:
+            log.warning("send_with_budget: markdown send failed: %s", err)
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
@@ -559,7 +572,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         return first_msg_id
 
     tg = get_tg()
-    for idx, part in enumerate(split_telegram(full)):
+    chunks = split_telegram(full)
+    for idx, part in enumerate(chunks):
         # First chunk uses reply_to_message_id if provided
         if idx == 0 and reply_to_message_id:
             ok, err, sent_id = tg.send_message_reply(chat_id, part, reply_to_message_id)
@@ -568,6 +582,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         else:
             ok, err = tg.send_message(chat_id, part)
         if not ok:
+            if idx > 0:
+                log.warning("send_with_budget: partial failure at chunk %d/%d: %s", idx + 1, len(chunks), err)
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
@@ -579,4 +595,6 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                 },
             )
             break
+    else:
+        log.info("send_with_budget: sent %d plain chunk(s), first_msg_id=%s", len(chunks), first_msg_id)
     return first_msg_id

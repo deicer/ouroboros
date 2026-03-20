@@ -123,6 +123,8 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
         return "⚠️ Empty message."
 
     from ouro.utils import append_jsonl
+    log.info("Proactive message queued: chat_id=%s, len=%d, reason=%s",
+             ctx.current_chat_id, len(text), reason or "none")
     ctx.pending_events.append({
         "type": "send_message",
         "chat_id": ctx.current_chat_id,
