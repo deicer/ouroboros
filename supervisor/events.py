@@ -80,7 +80,7 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
     safe_body = text[:180].replace("_", "\\_") if text else "thinking…"
     new_text = f"{spinner} _{safe_body}_ · {counter}" if text else spinner
     now = time.time()
-    if now - status["last_edit_ts"] < 0.4:
+    if now - status["last_edit_ts"] < 1.0:
         status["last_text"] = new_text  # store for lazy flush
         return
     try:
@@ -97,14 +97,14 @@ def tick_status_animations(ctx: Any) -> None:
     """Rotate braille spinner and resend typing indicator independently of agent events.
 
     Called from the supervisor tick() loop (~every 0.1s). Debounced to at most
-    one edit per 0.4s per status message. Frame is time-based (0.2s/frame).
+    one edit per 1.0s per status message. Frame is time-based (0.2s/frame).
     """
     if not _STATUS_MESSAGES:
         return
     now = time.time()
     for task_id, status in list(_STATUS_MESSAGES.items()):
         elapsed = now - status["last_edit_ts"]
-        if elapsed < 0.4:
+        if elapsed < 1.0:
             continue
         # Advance frame based on elapsed time (~0.2s per frame)
         status["frame"] = status.get("frame", 0) + max(1, int(elapsed / 0.2))
