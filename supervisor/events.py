@@ -53,6 +53,7 @@ def _handle_status_start(evt: Dict[str, Any], ctx: Any) -> None:
                 "original_msg_id": original_msg_id,
                 "last_edit_ts": time.time(),
                 "last_text": initial_text,
+                "last_body": "thinking…",
                 "counter": 0,
             }
     except Exception:
@@ -73,6 +74,7 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
     # Increment counter before throttle check (every event counts)
     status["counter"] = status.get("counter", 0) + 1
     counter = status["counter"]
+    status["last_body"] = text[:180] if text else "thinking…"
     hourglass = "⏳" if counter % 2 == 0 else "⌛"
     new_text = f"{hourglass} *{text[:180]}* · {counter}" if text else hourglass
     now = time.time()
@@ -85,6 +87,39 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
         status["last_text"] = new_text
     except Exception:
         log.debug("Failed to edit status message", exc_info=True)
+
+
+def tick_status_animations(ctx: Any) -> None:
+    """Flip hourglass and resend typing indicator independently of agent events.
+
+    Called from the supervisor tick() loop (~every 0.1s). Debounced to at most
+    one edit per second per status message.
+    """
+    if not _STATUS_MESSAGES:
+        return
+    now = time.time()
+    for task_id, status in list(_STATUS_MESSAGES.items()):
+        elapsed = now - status["last_edit_ts"]
+        if elapsed < 1.0:
+            continue
+        status["counter"] = status.get("counter", 0) + 1
+        counter = status["counter"]
+        hourglass = "⏳" if counter % 2 == 0 else "⌛"
+        body = status.get("last_body") or "thinking…"
+        new_text = f"{hourglass} *{body}* · {counter}"
+        # Always update timestamp to maintain debounce even on failure
+        status["last_edit_ts"] = now
+        try:
+            ctx.TG.edit_message_text(status["chat_id"], status["status_msg_id"], new_text, parse_mode="Markdown")
+            status["last_text"] = new_text
+        except Exception:
+            log.debug("tick_status_animations: edit failed for task %s", task_id, exc_info=True)
+        # Resend typing indicator every ~5 seconds
+        if counter % 5 == 0:
+            try:
+                ctx.TG.send_chat_action(status["chat_id"], "typing")
+            except Exception:
+                pass
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:

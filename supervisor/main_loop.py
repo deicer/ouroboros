@@ -65,7 +65,7 @@ class Supervisor:
             get_event_q, ensure_workers_healthy, assign_tasks,
             handle_chat_direct, _get_chat_agent, WORKERS, PENDING, RUNNING,
         )
-        from supervisor.events import dispatch_event
+        from supervisor.events import dispatch_event, tick_status_animations
         from supervisor.queue import (
             enforce_task_timeouts, enqueue_evolution_task_if_needed,
             enqueue_task, persist_queue_snapshot,
@@ -85,6 +85,7 @@ class Supervisor:
                 break
             dispatch_event(evt, self.event_ctx)
 
+        tick_status_animations(self.event_ctx)
         enforce_task_timeouts()
         enqueue_evolution_task_if_needed()
 
