@@ -297,6 +297,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     Every 10 calls, fetches OpenRouter ground truth to refresh limit_remaining.
     """
     def _to_float(v: Any, default: float = 0.0) -> float:
+        if v is None:
+            return default
         try:
             return float(v)
         except Exception:
@@ -304,6 +306,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             return default
 
     def _to_int(v: Any, default: int = 0) -> int:
+        if v is None:
+            return default
         try:
             return int(v)
         except Exception:
