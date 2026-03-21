@@ -12,22 +12,26 @@ catch missing fields at creation time.
 Status Message Lifecycle
 ========================
 1. Agent emits "status_start" event (agent.py:_emit_status_start) when a task begins.
-   → _handle_status_start sends an initial "... thinking…" reply to the user's Telegram message
+   → _handle_status_start sends an initial "⠋ thinking…" reply to the user's Telegram message
      and registers a tracking dict in _STATUS_MESSAGES[task_id].
 
 2. Agent emits "status_update" events via emit_progress() during the LLM loop.
    → _handle_status_update updates last_body and counter, then edits the Telegram
      message (debounced to _STATUS_DEBOUNCE_S = 1s to avoid rate limits).
    Currently the only emit per round is tool names (e.g. "repo_read, bash").
-   Resends "typing" indicator every 5th update.
 
-3. Agent emits "status_done" when the task completes.
+3. Supervisor tick() calls tick_status_animations() ~every 0.1s.
+   → Rotates the braille spinner, flushes any debounced text, and resends
+     "typing" indicator every ~5 ticks.
+
+4. Agent emits "status_done" when the task completes.
    → _handle_status_done deletes the status message and cleans up tracking.
 
 Key fields in _STATUS_MESSAGES[task_id]:
-  - last_body: raw progress text (no escaping)
-  - last_text: full formatted message (with markdown escaping)
+  - last_body: raw progress text (no escaping), used by tick to rebuild message
+  - last_text: full formatted message (with spinner + markdown escaping)
   - counter: total status_update events received (displayed as "· N")
+  - frame: spinner frame index (advanced each tick)
   - last_edit_ts: timestamp of last Telegram edit (for debounce)
 """
 
@@ -54,6 +58,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _STATUS_MESSAGES: Dict[str, Dict] = {}
 # {task_id: {chat_id, status_msg_id, original_msg_id, last_edit_ts, last_text}}
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _STATUS_DEBOUNCE_S = 1.0  # min interval between status message edits
 
 
@@ -67,7 +72,7 @@ def _handle_status_start(evt: Dict[str, Any], ctx: Any) -> None:
     if not chat_id or not task_id:
         return
     try:
-        initial_text = "... _thinking…_"
+        initial_text = f"{_SPINNER_FRAMES[0]} _thinking…_"
         ok, err, sent_id = ctx.TG.send_message_reply(chat_id, initial_text, original_msg_id, parse_mode="Markdown")
         if ok and sent_id:
             _STATUS_MESSAGES[task_id] = {
@@ -78,6 +83,7 @@ def _handle_status_start(evt: Dict[str, Any], ctx: Any) -> None:
                 "last_text": initial_text,
                 "last_body": "thinking…",
                 "counter": 0,
+                "frame": 0,
             }
     except Exception:
         log.debug("Failed to send status_start message", exc_info=True)
@@ -98,14 +104,15 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
     status["counter"] = status.get("counter", 0) + 1
     counter = status["counter"]
     status["last_body"] = text[:180] if text else "thinking…"
+    spinner = _SPINNER_FRAMES[status.get("frame", 0) % len(_SPINNER_FRAMES)]
     # Strip Markdown special chars so they don't break the outer _italic_ wrapper.
     # Telegram legacy Markdown does NOT support backslash escaping — only stripping works.
     # Underscores become hyphens for readability (web_search → web-search).
     safe_body = re.sub(r'[*`\[\]]', '', text[:180]).replace('_', '-') if text else "thinking…"
-    new_text = f"... _{safe_body}_ · {counter}"
+    new_text = f"{spinner} _{safe_body}_ · {counter}"
     now = time.time()
     if now - status["last_edit_ts"] < _STATUS_DEBOUNCE_S:
-        status["last_text"] = new_text  # will be sent on next non-debounced update
+        status["last_text"] = new_text  # store for lazy flush
         return
     log.debug("Status edit text: %s", new_text)
     try:
@@ -116,12 +123,47 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
             status["last_edit_ts"] = now + 2 * _STATUS_DEBOUNCE_S  # back off
     except Exception:
         log.debug("Failed to edit status message", exc_info=True)
-    # Resend typing indicator every 5th update
-    if counter % 5 == 0:
+
+
+def tick_status_animations(ctx: Any) -> None:
+    """Rotate braille spinner and resend typing indicator independently of agent events.
+
+    Called from the supervisor tick() loop (~every 0.1s). Debounced to at most
+    one edit per _STATUS_DEBOUNCE_S per status message. One frame per tick.
+    """
+    if not _STATUS_MESSAGES:
+        return
+    now = time.time()
+    for task_id, status in list(_STATUS_MESSAGES.items()):
+        elapsed = now - status["last_edit_ts"]
+        if elapsed < _STATUS_DEBOUNCE_S:
+            continue
+        # Advance one frame per tick (smooth rotation at 1s debounce)
+        status["frame"] = status.get("frame", 0) + 1
+        frame = status["frame"]
+        spinner = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
+        counter = status.get("counter", 0)
+        body = status.get("last_body") or "thinking…"
+        # Strip Markdown special chars so they don't break the outer _italic_ wrapper.
+        # Telegram legacy Markdown does NOT support backslash escaping — only stripping works.
+        # Underscores become hyphens for readability (web_search → web-search).
+        safe_body = re.sub(r'[*`\[\]]', '', body).replace('_', '-')
+        new_text = f"{spinner} _{safe_body}_ · {counter}"
+        # Always update timestamp to maintain debounce even on failure
+        status["last_edit_ts"] = now
         try:
-            ctx.TG.send_chat_action(status["chat_id"], "typing")
+            ok, err = ctx.TG.edit_message_text(status["chat_id"], status["status_msg_id"], new_text, parse_mode="Markdown")
+            status["last_text"] = new_text
+            if err == "rate_limited":
+                status["last_edit_ts"] = now + 2 * _STATUS_DEBOUNCE_S  # back off
         except Exception:
-            pass
+            log.debug("tick_status_animations: edit failed for task %s", task_id, exc_info=True)
+        # Resend typing indicator every ~5 ticks (~5s at current debounce)
+        if frame % 5 == 0:
+            try:
+                ctx.TG.send_chat_action(status["chat_id"], "typing")
+            except Exception:
+                pass
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
