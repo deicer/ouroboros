@@ -615,8 +615,6 @@ def run_llm_loop(
                     messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
-            if round_idx > 0:
-                emit_progress(f"thinking… round {round_idx + 1}")
             msg, cost = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type

@@ -8,6 +8,31 @@ Events can be either typed dataclasses (supervisor.event_types) or plain dicts.
 The dispatch layer normalizes both to dicts for handler compatibility.
 Typed events are preferred for new code — they provide IDE autocomplete and
 catch missing fields at creation time.
+
+Status Message Lifecycle
+========================
+1. Agent emits "status_start" event (agent.py:_emit_status_start) when a task begins.
+   → _handle_status_start sends an initial "⠋ thinking…" reply to the user's Telegram message
+     and registers a tracking dict in _STATUS_MESSAGES[task_id].
+
+2. Agent emits "status_update" events via emit_progress() during the LLM loop.
+   → _handle_status_update updates last_body and counter, then edits the Telegram
+     message (debounced to _STATUS_DEBOUNCE_S = 1s to avoid rate limits).
+   Currently the only emit per round is tool names (e.g. "repo_read, bash").
+
+3. Supervisor tick() calls tick_status_animations() ~every 0.1s.
+   → Rotates the braille spinner, flushes any debounced text, and resends
+     "typing" indicator every ~5 ticks.
+
+4. Agent emits "status_done" when the task completes.
+   → _handle_status_done deletes the status message and cleans up tracking.
+
+Key fields in _STATUS_MESSAGES[task_id]:
+  - last_body: raw progress text (no escaping), used by tick to rebuild message
+  - last_text: full formatted message (with spinner + markdown escaping)
+  - counter: total status_update events received (displayed as "· N")
+  - frame: spinner frame index (advanced each tick)
+  - last_edit_ts: timestamp of last Telegram edit (for debounce)
 """
 
 from __future__ import annotations
@@ -79,7 +104,7 @@ def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
     status["last_body"] = text[:180] if text else "thinking…"
     spinner = _SPINNER_FRAMES[status.get("frame", 0) % len(_SPINNER_FRAMES)]
     safe_body = text[:180].replace("_", "\\_") if text else "thinking…"
-    new_text = f"{spinner} _{safe_body}_ · {counter}" if text else spinner
+    new_text = f"{spinner} _{safe_body}_ · {counter}"
     now = time.time()
     if now - status["last_edit_ts"] < _STATUS_DEBOUNCE_S:
         status["last_text"] = new_text  # store for lazy flush

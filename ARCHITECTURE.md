@@ -160,7 +160,7 @@ Typed event dataclasses for all 17 event types. Provides IDE autocomplete, field
 Event dispatcher. Workers communicate with supervisor exclusively through a multiprocessing Queue.
 
 - `status_start` — sends "⏳" reply to user's original message, tracks status message per task (with counter).
-- `status_update` — edits status message with progress text (1s debounce, alternating ⏳/⌛, round counter). Falls back to separate progress message for tasks without a status message (evolution, consciousness, worker-mode).
+- `status_update` — edits status message with progress text (1s debounce, braille spinner, tool names + counter). Falls back to separate progress message for tasks without a status message (evolution, consciousness, worker-mode).
 - `llm_usage` — accumulates token costs, logs to events.jsonl.
 - `task_heartbeat` — updates last progress time in RUNNING.
 - `typing_start` — sends Telegram typing indicator.
@@ -347,7 +347,7 @@ worker_main() → Agent.handle_task()
   → status_start event → supervisor replies "⏳" to user's message
   → context.build_llm_messages()
   → loop.run_llm_loop()
-    → [LLM call → parse tool calls → status_update (round N · tool names) → execute tools]* (up to 200 rounds)
+    → [LLM call → parse tool calls → status_update (tool names · counter) → execute tools]* (up to 200 rounds)
     → emit events (llm_usage, task_heartbeat)
   → send_message event → supervisor edits "⏳" with final result (edit-in-place)
   → task_done event → supervisor drains queue
