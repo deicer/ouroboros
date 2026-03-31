@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _WHISPER_MODEL = None
-WHISPER_MODEL_NAME = "tiny"  # tiny is fast and good enough for voice commands
+WHISPER_MODEL_NAME = "base"  # better accuracy, still fast enough
 VOICE_TIMEOUT_SEC = 30  # max seconds for voice transcription
 VOICE_FILE_SIZE_LIMIT = 25_000_000  # 25MB max voice file size
 
