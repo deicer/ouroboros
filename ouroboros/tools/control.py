@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.bootstrap_env import should_deliver_proactive_owner_messages_from_env
 from ouroboros.utils import utc_now_iso, write_text, run_cmd
 
 log = logging.getLogger(__name__)
@@ -110,6 +111,8 @@ def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
         return "⚠️ No active chat — cannot send proactive message."
     if not text or not text.strip():
         return "⚠️ Empty message."
+    if not should_deliver_proactive_owner_messages_from_env():
+        return "OK: proactive owner message suppressed by policy."
 
     from ouroboros.utils import append_jsonl
     ctx.pending_events.append({

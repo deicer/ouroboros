@@ -64,12 +64,127 @@ def _tail_jsonl(path: pathlib.Path, limit: int) -> List[Dict[str, Any]]:
     return out
 
 
+def _cache_hit_rate_pct(prompt_tokens: Any, cached_tokens: Any) -> float:
+    try:
+        prompt = int(prompt_tokens or 0)
+        cached = int(cached_tokens or 0)
+    except Exception:
+        return 0.0
+    if prompt <= 0:
+        return 0.0
+    return round((cached / prompt) * 100.0, 1)
+
+
+def _entry_preview(entry: Dict[str, Any]) -> str:
+    details = entry.get("details") or {}
+    return str(
+        details.get("response_preview")
+        or details.get("assistant_preview")
+        or details.get("result_preview")
+        or ""
+    ).strip()
+
+
+def _same_response_preview(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    pa = _entry_preview(a)
+    pb = _entry_preview(b)
+    if not pa or not pb:
+        return False
+    return pa == pb or pa.startswith(pb) or pb.startswith(pa)
+
+
+def _supports_cache_metrics(entry: Dict[str, Any]) -> bool:
+    step = str(entry.get("step") or "")
+    return step in {"llm_response", "final_response"}
+
+
+def _collapse_duplicate_final_responses(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(entries) < 2:
+        return entries
+    collapsed: List[Dict[str, Any]] = []
+    idx = 0
+    while idx < len(entries):
+        current = entries[idx]
+        nxt = entries[idx + 1] if idx + 1 < len(entries) else None
+        if nxt is not None:
+            cur_details = current.get("details") or {}
+            if (
+                str(current.get("step") or "") == "llm_response"
+                and str(nxt.get("step") or "") == "final_response"
+                and str(current.get("source") or "") == str(nxt.get("source") or "")
+                and str(current.get("task_id") or "") == str(nxt.get("task_id") or "")
+                and int(current.get("round") or 0) == int(nxt.get("round") or 0)
+                and int(cur_details.get("tool_count") or 0) == 0
+                and _same_response_preview(current, nxt)
+            ):
+                collapsed.append(nxt)
+                idx += 2
+                continue
+        collapsed.append(current)
+        idx += 1
+    return collapsed
+
+
+def _read_recent_llm_metrics(drive_root: pathlib.Path, limit: int) -> Dict[Tuple[str, str, int], Dict[str, Any]]:
+    path = drive_root / "logs" / "events.jsonl"
+    items = _tail_jsonl(path, max(limit * 8, 800))
+    indexed: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
+    for obj in items:
+        event_type = str(obj.get("type") or "")
+        task_id = str(obj.get("task_id") or "")
+        round_idx = _to_int(obj.get("round", 0), default=0, minimum=0, maximum=1000000)
+        if event_type == "llm_round" and task_id and round_idx > 0:
+            indexed[("task_loop", task_id, round_idx)] = obj
+            continue
+        if event_type == "llm_usage" and str(obj.get("category") or "") == "consciousness" and round_idx > 0:
+            indexed[("consciousness", "", round_idx)] = obj
+    return indexed
+
+
+def _enrich_entries_with_llm_metrics(
+    entries: List[Dict[str, Any]],
+    drive_root: pathlib.Path,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    metrics = _read_recent_llm_metrics(drive_root, limit=limit)
+    enriched: List[Dict[str, Any]] = []
+    for entry in entries:
+        item = dict(entry)
+        details = dict(item.get("details") or {})
+        if not _supports_cache_metrics(item):
+            item["details"] = details
+            enriched.append(item)
+            continue
+        source = str(item.get("source") or "")
+        task_id = str(item.get("task_id") or details.get("task_id") or "")
+        round_idx = _to_int(item.get("round", details.get("round", 0)), default=0, minimum=0, maximum=1000000)
+        metric: Optional[Dict[str, Any]] = None
+        if source == "task_loop" and task_id and round_idx > 0:
+            metric = metrics.get(("task_loop", task_id, round_idx))
+        elif source == "consciousness" and round_idx > 0:
+            metric = metrics.get(("consciousness", "", round_idx))
+        if metric:
+            prompt_tokens = int(metric.get("prompt_tokens") or 0)
+            cached_tokens = int(metric.get("cached_tokens") or 0)
+            details["model"] = details.get("model") or metric.get("model") or ""
+            details["prompt_tokens"] = prompt_tokens
+            details["completion_tokens"] = int(metric.get("completion_tokens") or 0)
+            details["cached_tokens"] = cached_tokens
+            details["cache_write_tokens"] = int(metric.get("cache_write_tokens") or 0)
+            details["cache_hit_rate_pct"] = _cache_hit_rate_pct(prompt_tokens, cached_tokens)
+            item["details"] = details
+        enriched.append(item)
+    return enriched
+
+
 def _read_thinking(drive_root: pathlib.Path, limit: int, since: str = "") -> Tuple[List[Dict[str, Any]], str]:
     path = drive_root / "logs" / "thinking_trace.jsonl"
     entries = _tail_jsonl(path, max(limit * 4, 400))
     if since:
         entries = [e for e in entries if str(e.get("ts") or "") > since]
     entries = entries[-limit:]
+    entries = _enrich_entries_with_llm_metrics(entries, drive_root, limit=limit)
+    entries = _collapse_duplicate_final_responses(entries)
     latest_ts = str(entries[-1].get("ts") or "") if entries else ""
     return entries, latest_ts
 
@@ -264,6 +379,10 @@ def _page_html() -> str:
       return d.assistant_preview || d.response_preview || d.result_preview || "";
     }
 
+    function hasCacheMetric(d) {
+      return Number.isFinite(Number(d && d.cache_hit_rate_pct));
+    }
+
     function updateSourceOptions() {
       const seen = new Set([""]);
       for (const e of state.entries) seen.add(e.source || "");
@@ -341,6 +460,10 @@ def _page_html() -> str:
         const round = d.round || e.round || "";
         const taskId = d.task_id || e.task_id || "";
         const tool = d.tool || "";
+        const cacheRate = Number(d.cache_hit_rate_pct);
+        const cacheBadge = hasCacheMetric(d)
+          ? `<span class="badge">cache ${esc(cacheRate.toFixed(1))}%</span>`
+          : "";
         return `
           <article class="item ${klass}" data-entry-key="${esc(key)}">
             <div class="head">
@@ -349,6 +472,7 @@ def _page_html() -> str:
               ${round ? `<span class="badge">round ${esc(round)}</span>` : ""}
               ${taskId ? `<span class="badge">task ${esc(taskId)}</span>` : ""}
               ${tool ? `<span class="badge">tool ${esc(tool)}</span>` : ""}
+              ${cacheBadge}
               <span class="ts">${esc(e.ts || "")}</span>
             </div>
             ${preview ? `<div class="preview">${esc(preview)}</div>` : ""}

@@ -28,6 +28,14 @@ def _semi_stable_text(messages: list[dict]) -> str:
     return str(content[1]["text"])
 
 
+def _dynamic_text(messages: list[dict]) -> str:
+    system = messages[0]
+    assert system["role"] == "system"
+    content = system["content"]
+    assert isinstance(content, list)
+    return str(content[2]["text"])
+
+
 def test_build_llm_messages_includes_goals_section_and_clips(tmp_path):
     goals_path = tmp_path / "memory" / "goals.json"
     goals_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,3 +94,37 @@ def test_build_llm_messages_reads_legacy_chat_history_summary(tmp_path):
     assert "## Dialogue Summary" in semi_stable
     assert "legacy compacted history" in semi_stable
     assert "Legacy summary block" in semi_stable
+
+
+def test_build_llm_messages_runtime_context_omits_utc_now_and_volatile_state_fields(tmp_path):
+    state_path = tmp_path / "state" / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "owner_id": 123,
+                "owner_chat_id": 456,
+                "no_approve_mode": True,
+                "session_id": "volatile-session",
+                "tg_offset": 999,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    env = _TestEnv(repo_root=REPO, drive_root=tmp_path)
+    memory = Memory(drive_root=tmp_path, repo_dir=REPO)
+    messages, _ = build_llm_messages(
+        env=env,
+        memory=memory,
+        task={"id": "task-runtime", "type": "user", "text": "check runtime"},
+    )
+
+    dynamic = _dynamic_text(messages)
+    assert '"utc_now"' not in dynamic
+    assert '"owner_id": 123' in dynamic
+    assert '"owner_chat_id": 456' in dynamic
+    assert '"no_approve_mode": true' in dynamic
+    assert "volatile-session" not in dynamic
+    assert '"tg_offset"' not in dynamic

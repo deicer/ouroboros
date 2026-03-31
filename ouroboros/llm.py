@@ -7,11 +7,14 @@ Contract: chat(), default_model(), available_models(), add_usage().
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import pathlib
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -72,6 +75,262 @@ def should_use_openrouter_budget() -> bool:
 
 def get_chat_completions_url() -> str:
     return f"{get_llm_base_url().rstrip('/')}/chat/completions"
+
+
+def build_prompt_cache_key(
+    *,
+    scope: str,
+    model: str,
+    task_id: str = "",
+    session_id: str = "",
+    tool_names: Optional[List[str]] = None,
+) -> str:
+    payload = {
+        "scope": str(scope or "").strip(),
+        "model": str(model or "").strip(),
+        "task_id": str(task_id or "").strip(),
+        "session_id": str(session_id or "").strip(),
+        "tool_names": [str(name or "").strip() for name in (tool_names or []) if str(name or "").strip()],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"ouroboros:{payload['scope'] or 'default'}:{digest}"
+
+
+def build_response_session_id(
+    *,
+    scope: str,
+    runtime_session_id: str = "",
+    task_id: str = "",
+) -> str:
+    payload = {
+        "scope": str(scope or "").strip(),
+        "runtime_session_id": str(runtime_session_id or "").strip(),
+        "task_id": str(task_id or "").strip(),
+    }
+    seed = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ouroboros-response-session:{seed}"))
+
+
+def _default_prompt_cache_retention(model: str) -> str:
+    normalized = str(model or "").strip().lower()
+    if normalized in {"gpt-5.4", "openai/gpt-5.4"}:
+        return "in-memory"
+    return ""
+
+
+def _normalize_prompt_cache_retention(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    lowered = normalized.lower().replace("_", "-")
+    if lowered == "in-memory":
+        return "in-memory"
+    if lowered == "24h":
+        return "24h"
+    return normalized
+
+
+def _message_content_to_responses_items(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+
+    if not isinstance(content, list):
+        return [{"type": "input_text", "text": str(content or "")}]
+
+    items: List[Dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, str):
+            items.append({"type": "input_text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"text", "input_text", "output_text"}:
+            text = str(block.get("text") or "")
+            items.append({"type": "input_text", "text": text})
+            continue
+        if block_type in {"image_url", "input_image"}:
+            image_url = block.get("image_url")
+            if isinstance(image_url, dict):
+                image_url = image_url.get("url")
+            detail = str(block.get("detail") or "auto").strip().lower() or "auto"
+            if image_url:
+                items.append({
+                    "type": "input_image",
+                    "image_url": str(image_url),
+                    "detail": detail if detail in {"low", "high", "auto"} else "auto",
+                })
+                continue
+            file_id = str(block.get("file_id") or "").strip()
+            if file_id:
+                items.append({
+                    "type": "input_image",
+                    "file_id": file_id,
+                    "detail": detail if detail in {"low", "high", "auto"} else "auto",
+                })
+    return items or [{"type": "input_text", "text": ""}]
+
+
+def _chat_messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role in {"system", "developer"}:
+            continue
+        if role in {"user", "assistant"}:
+            content = msg.get("content")
+            if content not in (None, "") or role != "assistant":
+                items.append({
+                    "type": "message",
+                    "role": role,
+                    "content": _message_content_to_responses_items(content),
+                })
+            for tool_call in msg.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") or {}
+                call_id = str(tool_call.get("id") or tool_call.get("call_id") or "").strip()
+                name = str(function.get("name") or tool_call.get("name") or "").strip()
+                arguments = function.get("arguments")
+                if isinstance(arguments, (dict, list)):
+                    arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                arguments_str = str(arguments or "")
+                if not call_id or not name:
+                    continue
+                items.append({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments_str,
+                })
+            continue
+        if role == "tool":
+            call_id = str(msg.get("tool_call_id") or "").strip()
+            if not call_id:
+                continue
+            items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": str(msg.get("content") or ""),
+            })
+    return items
+
+
+def _chat_messages_to_responses_instructions(messages: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"system", "developer"}:
+            continue
+        content_items = _message_content_to_responses_items(msg.get("content"))
+        text_parts = [str(item.get("text") or "") for item in content_items if item.get("type") == "input_text"]
+        text = "".join(text_parts).strip()
+        if not text:
+            continue
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _chat_tools_to_responses_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        if str(tool.get("type") or "") != "function":
+            continue
+        function = tool.get("function") or {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        entry: Dict[str, Any] = {
+            "type": "function",
+            "name": name,
+        }
+        description = str(function.get("description") or "").strip()
+        if description:
+            entry["description"] = description
+        parameters = function.get("parameters")
+        if parameters is not None:
+            entry["parameters"] = parameters
+        strict = function.get("strict")
+        if strict is not None:
+            entry["strict"] = bool(strict)
+        out.append(entry)
+    return out
+
+
+def _responses_output_text(item: Dict[str, Any]) -> str:
+    text_parts: List[str] = []
+    for part in item.get("content") or []:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("type") or "").strip()
+        if part_type in {"output_text", "input_text", "text"}:
+            text_parts.append(str(part.get("text") or ""))
+    return "".join(text_parts)
+
+
+def _responses_to_chat_message(resp_dict: Dict[str, Any]) -> Dict[str, Any]:
+    output = resp_dict.get("output") or []
+    content_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "message" and str(item.get("role") or "").strip().lower() == "assistant":
+            text = _responses_output_text(item)
+            if text:
+                content_parts.append(text)
+            continue
+        if item_type == "function_call":
+            call_id = str(item.get("call_id") or item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not call_id or not name:
+                continue
+            tool_calls.append({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": str(item.get("arguments") or ""),
+                },
+            })
+    return {
+        "role": "assistant",
+        "content": "".join(content_parts),
+        "tool_calls": tool_calls,
+    }
+
+
+def _responses_to_usage(resp_dict: Dict[str, Any]) -> Dict[str, Any]:
+    raw_usage = resp_dict.get("usage") or {}
+    input_details = raw_usage.get("input_tokens_details") or {}
+    usage: Dict[str, Any] = {
+        "prompt_tokens": int(raw_usage.get("input_tokens") or 0),
+        "completion_tokens": int(raw_usage.get("output_tokens") or 0),
+        "total_tokens": int(raw_usage.get("total_tokens") or 0),
+    }
+    cached_tokens = input_details.get("cached_tokens")
+    if cached_tokens:
+        usage["cached_tokens"] = int(cached_tokens)
+    cache_write = (
+        input_details.get("cache_write_tokens")
+        or input_details.get("cache_creation_tokens")
+        or input_details.get("cache_creation_input_tokens")
+    )
+    if cache_write:
+        usage["cache_write_tokens"] = int(cache_write)
+    cost = raw_usage.get("cost")
+    if cost:
+        usage["cost"] = float(cost)
+    return usage
 
 
 def _env_model_list(name: str) -> List[str]:
@@ -358,7 +617,11 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 
     try:
         url = f"{get_llm_base_url().rstrip('/')}/models"
-        resp = requests.get(url, timeout=15)
+        headers = {}
+        api_key = get_llm_api_key()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        resp = requests.get(url, timeout=15, headers=headers or None)
         resp.raise_for_status()
 
         data = resp.json()
@@ -463,14 +726,15 @@ class LLMClient:
         reasoning_effort: str = "medium",
         max_tokens: int = 16384,
         tool_choice: str = "auto",
+        prompt_cache_key: str = "",
+        prompt_cache_retention: str = "",
+        session_id: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
         model = resolve_model_from_env(model)
-
-        extra_body: Dict[str, Any] = {
-            "reasoning": build_reasoning_config(model, reasoning_effort=reasoning_effort),
-        }
+        reasoning = build_reasoning_config(model, reasoning_effort=reasoning_effort)
+        extra_body: Dict[str, Any] = {}
 
         # Pin Anthropic models to Anthropic provider for prompt caching
         if model.startswith("anthropic/"):
@@ -482,44 +746,34 @@ class LLMClient:
 
         kwargs: Dict[str, Any] = {
             "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "extra_body": extra_body,
+            "input": _chat_messages_to_responses_input(messages),
+            "max_output_tokens": max_tokens,
+            "reasoning": reasoning,
         }
+        instructions = _chat_messages_to_responses_instructions(messages)
+        if instructions:
+            kwargs["instructions"] = instructions
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        resolved_session_id = str(session_id or "").strip()
+        resolved_prompt_cache_key = str(prompt_cache_key or "").strip() or resolved_session_id
+        if resolved_prompt_cache_key:
+            kwargs["prompt_cache_key"] = resolved_prompt_cache_key
+        retention = _normalize_prompt_cache_retention(prompt_cache_retention)
+        if not retention:
+            retention = _normalize_prompt_cache_retention(_default_prompt_cache_retention(model))
+        if retention:
+            kwargs["prompt_cache_retention"] = retention
+        if resolved_session_id:
+            kwargs["extra_headers"] = {"session_id": resolved_session_id}
         if tools:
-            # Add cache_control to last tool for Anthropic prompt caching
-            # This caches all tool schemas (they never change between calls)
-            tools_with_cache = [t for t in tools]  # shallow copy
-            if tools_with_cache:
-                last_tool = {**tools_with_cache[-1]}  # copy last tool
-                last_tool["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
-                tools_with_cache[-1] = last_tool
-            kwargs["tools"] = tools_with_cache
+            kwargs["tools"] = _chat_tools_to_responses_tools(tools)
             kwargs["tool_choice"] = tool_choice
 
-        resp = client.chat.completions.create(**kwargs)
+        resp = client.responses.create(**kwargs)
         resp_dict = resp.model_dump()
-        usage = resp_dict.get("usage") or {}
-        choices = resp_dict.get("choices") or [{}]
-        msg = (choices[0] if choices else {}).get("message") or {}
-
-        # Extract cached_tokens from prompt_tokens_details if available
-        if not usage.get("cached_tokens"):
-            prompt_details = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens"):
-                usage["cached_tokens"] = int(prompt_details["cached_tokens"])
-
-        # Extract cache_write_tokens from prompt_tokens_details if available
-        # OpenRouter: "cache_write_tokens"
-        # Native Anthropic: "cache_creation_tokens" or "cache_creation_input_tokens"
-        if not usage.get("cache_write_tokens"):
-            prompt_details_for_write = usage.get("prompt_tokens_details") or {}
-            if isinstance(prompt_details_for_write, dict):
-                cache_write = (prompt_details_for_write.get("cache_write_tokens")
-                              or prompt_details_for_write.get("cache_creation_tokens")
-                              or prompt_details_for_write.get("cache_creation_input_tokens"))
-                if cache_write:
-                    usage["cache_write_tokens"] = int(cache_write)
+        usage = _responses_to_usage(resp_dict)
+        msg = _responses_to_chat_message(resp_dict)
 
         # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
         if not usage.get("cost"):

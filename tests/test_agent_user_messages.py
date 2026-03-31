@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from ouroboros.agent import (
     Env,
     OuroborosAgent,
@@ -10,6 +12,7 @@ from ouroboros.agent import (
     _strip_background_preamble_for_user,
     _text_similarity,
 )
+from ouroboros.llm import build_response_session_id
 
 
 def test_loop_guard_message_is_short_russian_for_user():
@@ -190,3 +193,70 @@ def test_emit_task_results_sanitizes_raw_json_payload(monkeypatch, tmp_path):
     send_events = [e for e in agent._pending_events if e.get("type") == "send_message"]
     assert send_events
     assert "служебный payload" in send_events[-1]["text"].lower()
+
+
+def test_emit_task_results_skips_owner_delivery_for_silent_subtask(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "drive"
+    repo_dir.mkdir()
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "memory").mkdir(parents=True)
+    (drive_root / "memory" / "identity.md").write_text("# id", encoding="utf-8")
+    (drive_root / "memory" / "scratchpad.md").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    monkeypatch.setattr("ouroboros.agent.apply_fact_verification_gate", lambda text, **_: text)
+    env = Env(repo_dir=repo_dir, drive_root=drive_root)
+    agent = OuroborosAgent(env=env, event_queue=None)
+
+    agent._emit_task_results(
+        task={"id": "t3", "chat_id": 1, "text": "subtask", "_silent_subtask": True},
+        text="internal subtask result",
+        usage={},
+        llm_trace={"tool_calls": []},
+        start_time=0.0,
+        drive_logs=drive_root / "logs",
+    )
+
+    send_events = [e for e in agent._pending_events if e.get("type") == "send_message"]
+    assert send_events == []
+
+
+def test_rewrite_user_reply_uses_prompt_cache_key(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "drive"
+    repo_dir.mkdir()
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "memory").mkdir(parents=True)
+    (drive_root / "state").mkdir(parents=True)
+    (drive_root / "memory" / "identity.md").write_text("# id", encoding="utf-8")
+    (drive_root / "memory" / "scratchpad.md").write_text("", encoding="utf-8")
+    (drive_root / "state" / "state.json").write_text(
+        json.dumps({"session_id": "sess-agent"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    env = Env(repo_dir=repo_dir, drive_root=drive_root)
+    agent = OuroborosAgent(env=env, event_queue=None)
+
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured.update(kwargs)
+        return {"content": "Переписанный ответ."}, {"prompt_tokens": 10, "completion_tokens": 3}
+
+    monkeypatch.setattr(agent.llm, "chat", fake_chat)
+
+    out, _usage = agent._rewrite_user_reply_for_relevance(
+        "Шаблонный статус",
+        task_text="Почему так долго?",
+    )
+
+    expected_key = build_response_session_id(
+        scope="reply_rewrite",
+        runtime_session_id="sess-agent",
+    )
+    assert out == "Переписанный ответ."
+    assert captured["prompt_cache_key"] == expected_key
+    assert captured["session_id"] == expected_key

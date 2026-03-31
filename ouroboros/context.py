@@ -20,7 +20,6 @@ from ouroboros.utils import (
     estimate_tokens,
     get_git_info,
     read_text,
-    utc_now_iso,
 )
 
 log = logging.getLogger(__name__)
@@ -74,7 +73,7 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
 
 
 def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
-    """Build runtime context (utc_now, repo_dir, drive_root, git_head, git_branch, task info)."""
+    """Build runtime context with stable identifiers only."""
     # --- Git context ---
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
@@ -82,29 +81,37 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         log.debug("Failed to get git info for context", exc_info=True)
         git_branch, git_sha = "unknown", "unknown"
 
-    # --- State snapshot ---
-    state_data = {}
-    try:
-        state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
-        state_data = json.loads(state_json)
-    except Exception:
-        log.debug("Failed to read state data for runtime context", exc_info=True)
-        pass
-
-    no_approve_mode = bool(state_data.get("no_approve_mode"))
-
     # --- Runtime context JSON ---
     runtime_data = {
-        "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
         "drive_root": str(env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
         "task": {"id": task.get("id"), "type": task.get("type")},
-        "no_approve_mode": no_approve_mode,
+        "direct_chat": bool(task.get("_is_direct_chat")),
     }
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     return "## Runtime context\n\n" + runtime_ctx
+
+
+def _build_state_section(state_data: Dict[str, Any]) -> str:
+    stable_keys = (
+        "owner_id",
+        "owner_chat_id",
+        "no_approve_mode",
+        "evolution_mode_enabled",
+        "evolution_cycle",
+        "evolution_consecutive_failures",
+        "initialized",
+        "current_branch",
+        "current_sha",
+    )
+    snapshot = {
+        key: state_data.get(key)
+        for key in stable_keys
+        if key in state_data
+    }
+    return "## Drive state\n\n" + json.dumps(snapshot, ensure_ascii=False, indent=2)
 
 
 def _build_execution_strategy_section(task: Dict[str, Any]) -> str:
@@ -391,6 +398,11 @@ def build_llm_messages(
     bible_md = _safe_read(env.repo_path("BIBLE.md"))
     readme_md = _safe_read(env.repo_path("README.md"))
     state_json = _safe_read(env.drive_path("state/state.json"), fallback="{}")
+    try:
+        state_data = json.loads(state_json)
+    except Exception:
+        log.debug("Failed to parse state.json for context; using empty state snapshot", exc_info=True)
+        state_data = {}
 
     # --- Load memory ---
     memory.ensure_files()
@@ -430,7 +442,7 @@ def build_llm_messages(
 
     # Dynamic content: changes every round
     dynamic_parts = [
-        "## Drive state\n\n" + clip_text(state_json, 90000),
+        _build_state_section(state_data),
         _build_runtime_section(env, task),
     ]
     execution_strategy = _build_execution_strategy_section(task)
@@ -463,7 +475,7 @@ def build_llm_messages(
                 {
                     "type": "text",
                     "text": static_text,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    "cache_control": {"type": "ephemeral"},
                 },
                 {
                     "type": "text",
@@ -823,7 +835,7 @@ def _compact_tool_call_arguments(tool_name: str, args_json: str) -> Dict[str, An
     # Tools with large content fields that should be stripped
     LARGE_CONTENT_TOOLS = {
         "drive_write": "content",
-        "opencode_edit": "prompt",
+        "patch_edit": "prompt",
         "update_scratchpad": "content",
         "update_user_context": "content",
     }

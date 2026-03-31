@@ -1,4 +1,4 @@
-"""Git tools: repo_commit_push, git_status, git_diff."""
+"""Git tools: repo_commit_push, git_status, git_diff, git_repo_health."""
 
 from __future__ import annotations
 
@@ -7,12 +7,168 @@ import os
 import pathlib
 import subprocess
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, safe_relpath, run_cmd
 
 log = logging.getLogger(__name__)
+
+
+def _capture_git(repo_dir: pathlib.Path, cmd: List[str]) -> Tuple[int, str, str]:
+    result = subprocess.run(
+        cmd,
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
+
+
+def _resolve_git_dir(repo_dir: pathlib.Path) -> pathlib.Path:
+    dot_git = repo_dir / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    if dot_git.is_file():
+        try:
+            raw = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception:
+            return dot_git
+        prefix = "gitdir:"
+        if raw.lower().startswith(prefix):
+            candidate = raw[len(prefix):].strip()
+            return (repo_dir / candidate).resolve()
+    return dot_git
+
+
+def _inspect_git_repo_state(repo_dir: pathlib.Path) -> Dict[str, Any]:
+    git_dir = _resolve_git_dir(repo_dir)
+    rc_branch, branch, branch_err = _capture_git(repo_dir, ["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    rc_unmerged, unmerged_out, unmerged_err = _capture_git(
+        repo_dir,
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+    )
+    index_lock = git_dir / "index.lock"
+    try:
+        index_lock_age_sec = max(0.0, time.time() - index_lock.stat().st_mtime) if index_lock.exists() else 0.0
+    except Exception:
+        index_lock_age_sec = 0.0
+    unmerged_files = [line.strip() for line in unmerged_out.splitlines() if line.strip()] if rc_unmerged == 0 else []
+    return {
+        "git_dir": git_dir,
+        "branch": branch if rc_branch == 0 else "",
+        "branch_error": branch_err if rc_branch != 0 else "",
+        "unmerged_files": unmerged_files,
+        "unmerged_error": unmerged_err if rc_unmerged != 0 else "",
+        "rebase_in_progress": (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists(),
+        "merge_in_progress": (git_dir / "MERGE_HEAD").exists(),
+        "cherry_pick_in_progress": (git_dir / "CHERRY_PICK_HEAD").exists(),
+        "revert_in_progress": (git_dir / "REVERT_HEAD").exists(),
+        "index_lock_exists": index_lock.exists(),
+        "index_lock_age_sec": index_lock_age_sec,
+        "detached_head": branch == "HEAD",
+    }
+
+
+def _format_git_repo_state(state: Dict[str, Any]) -> str:
+    problems: List[str] = []
+    if state.get("rebase_in_progress"):
+        problems.append("rebase in progress")
+    if state.get("merge_in_progress"):
+        problems.append("merge in progress")
+    if state.get("cherry_pick_in_progress"):
+        problems.append("cherry-pick in progress")
+    if state.get("revert_in_progress"):
+        problems.append("revert in progress")
+    if state.get("index_lock_exists"):
+        age = int(float(state.get("index_lock_age_sec") or 0))
+        problems.append(f"index.lock present ({age}s old)")
+    unmerged_files = list(state.get("unmerged_files") or [])
+    if unmerged_files:
+        preview = ", ".join(unmerged_files[:5])
+        if len(unmerged_files) > 5:
+            preview += ", ..."
+        problems.append(f"unmerged files: {preview}")
+    branch = str(state.get("branch") or "").strip()
+    if branch == "HEAD":
+        problems.append("detached HEAD")
+    if not problems:
+        return "clean"
+    return "; ".join(problems)
+
+
+def _auto_recover_git_repo(ctx: ToolContext, state: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any]]:
+    actions: List[str] = []
+    git_dir = pathlib.Path(state.get("git_dir") or _resolve_git_dir(ctx.repo_dir))
+    lock_path = git_dir / "index.lock"
+    stale_lock_sec = int(os.environ.get("OUROBOROS_GIT_INDEX_LOCK_STALE_SEC", "120") or "120")
+
+    if state.get("index_lock_exists") and float(state.get("index_lock_age_sec") or 0) >= stale_lock_sec:
+        try:
+            lock_path.unlink()
+            actions.append("removed stale index.lock")
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.debug("Failed to remove stale git index lock", exc_info=True)
+
+    abort_steps = [
+        ("rebase_in_progress", ["git", "rebase", "--abort"], "aborted rebase"),
+        ("merge_in_progress", ["git", "merge", "--abort"], "aborted merge"),
+        ("cherry_pick_in_progress", ["git", "cherry-pick", "--abort"], "aborted cherry-pick"),
+        ("revert_in_progress", ["git", "revert", "--abort"], "aborted revert"),
+    ]
+    for key, cmd, label in abort_steps:
+        if not state.get(key):
+            continue
+        try:
+            run_cmd(cmd, cwd=ctx.repo_dir)
+            actions.append(label)
+        except Exception:
+            log.debug("Failed git recovery step %s", label, exc_info=True)
+
+    new_state = _inspect_git_repo_state(ctx.repo_dir)
+    blocking = bool(
+        new_state.get("rebase_in_progress")
+        or new_state.get("merge_in_progress")
+        or new_state.get("cherry_pick_in_progress")
+        or new_state.get("revert_in_progress")
+        or new_state.get("index_lock_exists")
+        or list(new_state.get("unmerged_files") or [])
+    )
+    return (not blocking), actions, new_state
+
+
+def _ensure_git_repo_ready(
+    ctx: ToolContext,
+    action: str = "git operation",
+    auto_recover: bool = True,
+) -> Tuple[bool, str]:
+    state = _inspect_git_repo_state(ctx.repo_dir)
+    blocking = bool(
+        state.get("rebase_in_progress")
+        or state.get("merge_in_progress")
+        or state.get("cherry_pick_in_progress")
+        or state.get("revert_in_progress")
+        or state.get("index_lock_exists")
+        or list(state.get("unmerged_files") or [])
+    )
+    if not blocking:
+        return True, ""
+
+    summary = _format_git_repo_state(state)
+    if not auto_recover:
+        return False, f"⚠️ GIT_REPO_UNHEALTHY: {summary}"
+
+    ok, actions, recovered_state = _auto_recover_git_repo(ctx, state)
+    recovered_summary = _format_git_repo_state(recovered_state)
+    if ok:
+        actions_text = ", ".join(actions) if actions else "no-op recovery"
+        return True, f"⚠️ GIT_REPO_AUTO_RECOVERED: auto-recovered before {action}: {actions_text}"
+    return False, (
+        f"⚠️ GIT_REPO_UNHEALTHY: {summary}. "
+        f"Auto-recovery before {action} was not enough; current state: {recovered_summary}"
+    )
 
 
 # --- Git lock ---
@@ -187,9 +343,16 @@ def _git_push_with_tests(ctx: ToolContext) -> tuple[bool, str]:
 
     try:
         run_cmd(["git", "pull", "--rebase", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
-    except Exception:
-        log.debug(f"Failed to pull --rebase before push", exc_info=True)
-        pass
+    except Exception as e:
+        log.debug("Failed to pull --rebase before push", exc_info=True)
+        ok, recover_note = _ensure_git_repo_ready(ctx, action="git pull --rebase", auto_recover=True)
+        if not ok:
+            return False, (
+                f"⚠️ GIT_ERROR (pull --rebase): {e}\n"
+                f"{recover_note}\nCommitted locally but NOT pushed."
+            )
+        if recover_note:
+            note = f"{note}\n{recover_note}".strip()
 
     try:
         run_cmd(["git", "push", "origin", ctx.branch_dev], cwd=ctx.repo_dir)
@@ -207,6 +370,9 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
         return "⚠️ ERROR: commit_message must be non-empty."
     lock = _acquire_git_lock(ctx)
     try:
+        ok, repo_note = _ensure_git_repo_ready(ctx, action="repo_commit_push", auto_recover=True)
+        if not ok:
+            return repo_note
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
@@ -241,6 +407,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
         _release_git_lock(lock)
     ctx.last_push_succeeded = True
     result = f"OK: committed and pushed to {ctx.branch_dev}: {commit_message}"
+    if repo_note:
+        result = f"{repo_note}\n{result}"
     if push_note:
         result += f"\n{push_note}"
     if paths is not None:
@@ -253,6 +421,34 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
             log.debug("Failed to check for untracked files after repo_commit_push", exc_info=True)
             pass
     return result
+
+
+def _git_repo_health(ctx: ToolContext, auto_recover: bool = False) -> str:
+    before = _inspect_git_repo_state(ctx.repo_dir)
+    before_summary = _format_git_repo_state(before)
+    lines = [
+        f"repo: {ctx.repo_dir}",
+        f"branch: {before.get('branch') or 'unknown'}",
+        f"healthy: {'yes' if before_summary == 'clean' else 'no'}",
+        f"state: {before_summary}",
+    ]
+    unmerged_files = list(before.get("unmerged_files") or [])
+    if unmerged_files:
+        lines.append("unmerged_files:")
+        lines.extend(f"- {path}" for path in unmerged_files[:20])
+
+    if not auto_recover:
+        return "\n".join(lines)
+
+    ok, note = _ensure_git_repo_ready(ctx, action="git_repo_health", auto_recover=True)
+    after = _inspect_git_repo_state(ctx.repo_dir)
+    after_summary = _format_git_repo_state(after)
+    lines.append("")
+    lines.append(f"recovery_ok: {'yes' if ok else 'no'}")
+    if note:
+        lines.append(note)
+    lines.append(f"post_state: {after_summary}")
+    return "\n".join(lines)
 
 
 def _git_status(ctx: ToolContext) -> str:
@@ -287,6 +483,20 @@ def get_tools() -> List[ToolEntry]:
             "description": "git status --porcelain",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }, _git_status, is_code_tool=True),
+        ToolEntry("git_repo_health", {
+            "name": "git_repo_health",
+            "description": (
+                "Inspect git repo health (rebase/merge/conflicts/index.lock/detached HEAD). "
+                "Use auto_recover=true to safely abort stuck git operations before editing or committing."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "auto_recover": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, attempt safe git recovery (abort rebase/merge, remove stale index.lock).",
+                },
+            }, "required": []},
+        }, _git_repo_health, is_code_tool=True),
         ToolEntry("git_diff", {
             "name": "git_diff",
             "description": "git diff (use staged=true to see staged changes after git add)",

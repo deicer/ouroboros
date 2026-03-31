@@ -20,7 +20,7 @@ from ouroboros.utils import safe_resolve_under_root
 
 
 _RE_COMMIT = re.compile(r"\b(?:commit|коммит)\s*[:#]?\s*([0-9a-f]{7,40})\b", re.IGNORECASE)
-_RE_PATH = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_+-]+")
+_RE_PATH = re.compile(r"(?:/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_+-]+")
 
 _FILE_ASSERTIVE_MARKERS = (
     "создан",
@@ -130,12 +130,41 @@ def _is_assertive_file_claim(text: str, match: re.Match[str]) -> bool:
 
 def _verify_file_exists(repo_dir: pathlib.Path, rel_path: str) -> FactFinding:
     claim = rel_path
-    try:
-        path = safe_resolve_under_root(repo_dir, rel_path)
-    except Exception:
-        return FactFinding(kind="file", claim=claim, ok=False, reason="unsafe path")
-    if path.exists():
-        return FactFinding(kind="file", claim=claim, ok=True, reason="exists")
+    repo_root = repo_dir.resolve()
+    normalized = str(rel_path or "").strip().replace("\\", "/")
+
+    candidates: List[str] = []
+    if normalized:
+        candidates.append(normalized)
+        if normalized.startswith("/"):
+            candidates.append(normalized.lstrip("/"))
+        repo_name = repo_root.name.strip()
+        if repo_name and normalized.startswith(f"{repo_name}/"):
+            candidates.append(normalized[len(repo_name) + 1 :])
+        if repo_name and normalized.startswith(f"/{repo_name}/"):
+            candidates.append(normalized[len(repo_name) + 2 :])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = str(candidate or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            path_obj = pathlib.Path(candidate)
+            if path_obj.is_absolute():
+                resolved = path_obj.resolve()
+                if resolved == repo_root or repo_root in resolved.parents:
+                    if resolved.exists():
+                        return FactFinding(kind="file", claim=claim, ok=True, reason="exists")
+                    continue
+            else:
+                resolved = safe_resolve_under_root(repo_root, candidate)
+                if resolved.exists():
+                    return FactFinding(kind="file", claim=claim, ok=True, reason="exists")
+        except Exception:
+            continue
+
     return FactFinding(kind="file", claim=claim, ok=False, reason="file not found")
 
 
@@ -159,7 +188,7 @@ def _tool_results_from_trace(llm_trace: Optional[Dict[str, Any]]) -> Sequence[Di
         if not isinstance(item, dict):
             continue
         tool = str(item.get("tool") or "")
-        if tool not in {"run_shell", "opencode_edit", "repo_commit_push"}:
+        if tool not in {"run_shell", "patch_edit", "repo_commit_push"}:
             continue
         out.append(item)
     return out

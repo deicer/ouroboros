@@ -88,3 +88,23 @@ def test_paid_limit_error_detection():
 
     assert _is_paid_limit_error(RuntimeError("Payment required: insufficient credits"))
     assert not _is_paid_limit_error(RuntimeError("temporary network timeout"))
+
+
+def test_no_distinct_fallback_message_for_openrouter_free():
+    from ouroboros.loop import _no_distinct_fallback_message
+
+    msg = _no_distinct_fallback_message("openrouter/free", 3)
+
+    assert "openrouter/free" in msg
+    assert "router" in msg.lower()
+    assert "No distinct fallback model is configured." in msg
+
+
+def test_no_distinct_fallback_message_for_regular_model():
+    from ouroboros.loop import _no_distinct_fallback_message
+
+    msg = _no_distinct_fallback_message("gpt-5.4", 3)
+
+    assert "gpt-5.4" in msg
+    assert "router" not in msg.lower()
+    assert "No distinct fallback model is configured." in msg

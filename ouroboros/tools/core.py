@@ -1,4 +1,4 @@
-"""File tools: repo_read (full/partial), repo_list, drive_read, drive_list, drive_write, codebase_digest, summarize_dialogue."""
+"""File tools: repo_read, repo_list, drive_read, drive_list, drive_write, codebase_digest, summarize_dialogue."""
 
 from __future__ import annotations
 
@@ -123,7 +123,7 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
-def _slice_repo_read_text(text: str, offset: int = 0, limit: int = 0, tail: int = 0) -> str:
+def _repo_read(ctx: ToolContext, path: str, limit: int = 0) -> str:
     raw_key = str(path or "").strip().replace("\\", "/")
     mapped_drive_key = _REPO_TO_DRIVE_ALIAS.get(raw_key) or _REPO_TO_DRIVE_ALIAS.get(raw_key.lower())
     if mapped_drive_key:
@@ -135,7 +135,7 @@ def _slice_repo_read_text(text: str, offset: int = 0, limit: int = 0, tail: int 
         try:
             file_path = _resolve_read_path(ctx.repo_dir, path)
         except Exception as e:
-            
+            return f"⚠️ PATH_ERROR: {e}"
 
     if file_path.is_dir():
         rel = file_path.relative_to(ctx.repo_dir) if file_path != ctx.repo_dir else pathlib.Path(".")
@@ -330,7 +330,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
     """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.llm import LLMClient, get_light_model_from_env
+    from ouroboros.llm import LLMClient, build_response_session_id, get_light_model_from_env
 
     # Read last_n messages from chat.jsonl
     chat_path = ctx.drive_root / "logs" / "chat.jsonl"
@@ -388,15 +388,29 @@ Now write a comprehensive summary:"""
         # Call LLM
         llm = LLMClient()
         model = get_light_model_from_env()
+        session_id = ""
+        try:
+            state_payload = json.loads(read_text(ctx.drive_root / "state" / "state.json"))
+            if isinstance(state_payload, dict):
+                session_id = str(state_payload.get("session_id") or "").strip()
+        except Exception:
+            log.debug("Failed to load session_id for summarize_dialogue prompt cache", exc_info=True)
 
         messages = [
             {"role": "user", "content": prompt}
         ]
+        response_session_id = build_response_session_id(
+            scope="summarize_dialogue",
+            runtime_session_id=session_id,
+            task_id=str(ctx.task_id or "").strip(),
+        )
 
         response, usage = llm.chat(
             messages=messages,
             model=model,
             max_tokens=4096,
+            prompt_cache_key=response_session_id,
+            session_id=response_session_id,
         )
 
         # Track cost in budget system
@@ -405,9 +419,17 @@ Now write a comprehensive summary:"""
                 "type": "llm_usage",
                 "ts": utc_now_iso(),
                 "task_id": ctx.task_id if ctx.task_id else "",
+                "model": model,
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "cached_tokens": int(usage.get("cached_tokens", 0) or 0),
+                "cache_write_tokens": int(usage.get("cache_write_tokens", 0) or 0),
+                "cost": float(usage.get("cost", 0) or 0),
                 "usage": {
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
+                    "cached_tokens": usage.get("cached_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
                     "cost": usage.get("cost", 0),
                 },
                 "category": "summarize",

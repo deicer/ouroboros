@@ -29,12 +29,14 @@ from ouroboros.utils import (
     get_git_info, sanitize_task_for_event, safe_resolve_under_root,
 )
 from ouroboros.llm import LLMClient, add_usage
+from ouroboros.llm import build_response_session_id
 from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
 from ouroboros.loop import run_llm_loop
 from ouroboros.response_verification import apply_fact_verification_gate
+from ouroboros.tools.git import _acquire_git_lock, _ensure_git_repo_ready, _release_git_lock
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +84,16 @@ _FOCUS_STOPWORDS = {
     "чтобы", "только", "сам", "сама", "сейчас", "тогда", "просто", "очень",
     "the", "and", "with", "from", "your", "about", "what", "why", "how",
 }
+
+
+def _load_runtime_session_id(drive_root: pathlib.Path) -> str:
+    try:
+        payload = json.loads(read_text(drive_root / "state" / "state.json"))
+        if isinstance(payload, dict):
+            return str(payload.get("session_id") or "").strip()
+    except Exception:
+        log.debug("Failed to load session_id for agent prompt cache", exc_info=True)
+    return ""
 
 
 def _split_user_and_log_text(text: str) -> Tuple[str, str]:
@@ -323,21 +335,22 @@ class OuroborosAgent:
         remote_sync_enabled = str(
             os.environ.get("OUROBOROS_STARTUP_AUTO_RESCUE_PUSH", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        # Remove stale index.lock (race condition when multiple workers start)
-        lock_path = self.env.repo_dir / ".git" / "index.lock"
-        if lock_path.exists():
-            try:
-                import time
-                lock_age = time.time() - lock_path.stat().st_mtime
-                if lock_age > 30:  # stale if older than 30s
-                    lock_path.unlink(missing_ok=True)
-                    log.warning(f"Removed stale .git/index.lock (age={lock_age:.0f}s)")
-                else:
-                    # Another process is actively using git — skip
-                    return {"status": "ok", "note": "index.lock held by another process"}, 0
-            except Exception:
-                pass
+        ctx = ToolContext(repo_dir=self.env.repo_dir, drive_root=self.env.drive_root, branch_dev=self.env.branch_dev)
         try:
+            lock = _acquire_git_lock(ctx, timeout_sec=10)
+        except TimeoutError:
+            return {"status": "ok", "note": "git lock held by another process"}, 0
+
+        try:
+            ok, repo_note = _ensure_git_repo_ready(ctx, action="startup auto-rescue", auto_recover=True)
+            if not ok:
+                return {
+                    "status": "warning",
+                    "note": repo_note,
+                    "auto_committed": False,
+                    "remote_sync_enabled": remote_sync_enabled,
+                }, 1
+
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=str(self.env.repo_dir),
@@ -345,25 +358,20 @@ class OuroborosAgent:
             )
             dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
             if dirty_files:
-                # Auto-rescue: commit and push
                 auto_committed = False
                 try:
-                    # Stage all changes (tracked + untracked init files)
                     subprocess.run(["git", "add", "-A"], cwd=str(self.env.repo_dir), timeout=10, check=True)
                     subprocess.run(
                         ["git", "commit", "-m", "auto-rescue: uncommitted changes detected on startup"],
                         cwd=str(self.env.repo_dir), timeout=30, check=True
                     )
                     if remote_sync_enabled:
-                        # Validate branch name only for remote sync operations.
                         if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
                             raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
-                        # Pull with rebase before push
                         subprocess.run(
                             ["git", "pull", "--rebase", "origin", self.env.branch_dev],
                             cwd=str(self.env.repo_dir), timeout=60, check=True
                         )
-                        # Push
                         try:
                             subprocess.run(
                                 ["git", "push", "origin", self.env.branch_dev],
@@ -374,7 +382,6 @@ class OuroborosAgent:
                                 f"Auto-rescued {len(dirty_files)} uncommitted files on startup"
                             )
                         except subprocess.CalledProcessError:
-                            # If push fails, undo the commit
                             subprocess.run(
                                 ["git", "reset", "HEAD~1"],
                                 cwd=str(self.env.repo_dir), timeout=10, check=True
@@ -389,15 +396,20 @@ class OuroborosAgent:
                         )
                 except Exception as e:
                     log.warning(f"Failed to auto-rescue uncommitted changes: {e}", exc_info=True)
-                return {
-                    "status": "warning", "files": dirty_files[:20],
+                info = {
+                    "status": "warning",
+                    "files": dirty_files[:20],
                     "auto_committed": auto_committed,
                     "remote_sync_enabled": remote_sync_enabled,
-                }, 1
-            else:
-                return {"status": "ok"}, 0
+                }
+                if repo_note:
+                    info["note"] = repo_note
+                return info, 1
+            return {"status": "ok", **({"note": repo_note} if repo_note else {})}, 0
         except Exception as e:
             return {"status": "error", "error": str(e)}, 0
+        finally:
+            _release_git_lock(lock)
 
     def _check_version_sync(self) -> Tuple[dict, int]:
         """Check VERSION file sync with git tags and pyproject.toml."""
@@ -692,12 +704,18 @@ class OuroborosAgent:
 
         try:
             model = self.llm.default_model()
+            response_session_id = build_response_session_id(
+                scope="reply_rewrite",
+                runtime_session_id=_load_runtime_session_id(self.env.drive_root),
+            )
             msg, usage = self.llm.chat(
                 messages=prompt_messages,
                 model=model,
                 tools=None,
                 reasoning_effort="low",
                 max_tokens=220,
+                prompt_cache_key=response_session_id,
+                session_id=response_session_id,
             )
             rewritten = str(msg.get("content") or "").strip()
             if rewritten:
@@ -804,12 +822,13 @@ class OuroborosAgent:
         user_text = fact_checked_text
         # Keep full model output for diagnostics even when user text is sanitized.
         log_text = str(text or "")
-        self._pending_events.append({
-            "type": "send_message", "chat_id": task["chat_id"],
-            "text": user_text or "\u200b", "log_text": log_text or "",
-            "format": "markdown",
-            "task_id": task.get("id"), "ts": utc_now_iso(),
-        })
+        if not bool(task.get("_silent_subtask")):
+            self._pending_events.append({
+                "type": "send_message", "chat_id": task["chat_id"],
+                "text": user_text or "\u200b", "log_text": log_text or "",
+                "format": "markdown",
+                "task_id": task.get("id"), "ts": utc_now_iso(),
+            })
 
         duration_sec = round(time.time() - start_time, 3)
         n_tool_calls = len(llm_trace.get("tool_calls", []))

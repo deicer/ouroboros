@@ -90,3 +90,28 @@ def test_auto_compact_skips_when_below_threshold(monkeypatch, tmp_path):
 
     assert out == messages
     assert tools.calls == []
+
+
+def test_history_compaction_does_not_trigger_only_from_round_count(monkeypatch):
+    messages = [
+        {"role": "user", "content": "short"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "a1", "function": {"name": "repo_read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a1", "content": "result"},
+    ]
+
+    monkeypatch.setattr(loop, "compact_tool_history", lambda msgs, keep_recent=6: list(msgs) + [{"role": "system", "content": "compacted"}])
+
+    out = loop._maybe_compact_history_messages(messages=messages, round_idx=12, pending_keep_recent=None)
+
+    assert out == messages
+
+
+def test_history_compaction_triggers_for_long_message_list(monkeypatch):
+    messages = [{"role": "user", "content": f"m{i}"} for i in range(61)]
+    marker = {"role": "system", "content": "compacted"}
+
+    monkeypatch.setattr(loop, "compact_tool_history", lambda msgs, keep_recent=6: list(msgs) + [marker])
+
+    out = loop._maybe_compact_history_messages(messages=messages, round_idx=4, pending_keep_recent=None)
+
+    assert out[-1] == marker

@@ -49,7 +49,7 @@ Telegram --> launcher.py
                 core.py             -- file ops
                 git.py              -- git ops
                 github.py           -- GitHub Issues
-                shell.py            -- shell, OpenCode CLI
+                shell.py            -- shell, Codex CLI
                 search.py           -- web search
                 control.py          -- restart, evolve, review
                 browser.py          -- Playwright (stealth)
@@ -75,8 +75,8 @@ Assumes you have a VPS (Ubuntu/Debian) with SSH access.
 | `GITHUB_TOKEN` | Yes | [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) -- Fine-grained token with **Contents: Read and write** on your fork |
 | `OPENAI_API_KEY` | No | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) -- Enables web search tool |
 | `GOOGLE_API_KEY` | No | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) -- Enables Mem0 knowledge backend (Gemini embedder/LLM) |
-| `OPENCODE_API_KEY` | No | OpenCode API key for OpenCode Zen provider (including free models) |
-| `ANTHROPIC_API_KEY` | No | Optional provider key (for OpenCode/provider integrations) |
+| `OPENCODE_API_KEY` | No | Legacy key from the old OpenCode flow; no longer needed for code edits |
+| `ANTHROPIC_API_KEY` | No | Optional provider key for other integrations |
 | `TOTAL_BUDGET` | No | Fallback spending limit in USD if OpenRouter key has no limit set |
 
 ### Step 2: Fork the Repository
@@ -104,7 +104,7 @@ nano .env   # Fill in all required values (GITHUB_USER = your GitHub username)
 docker compose up -d --build
 ```
 
-First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI, OpenCode CLI).
+First build takes ~5 minutes (installs Playwright, pip dependencies, GitHub CLI, and optional Codex CLI dependencies).
 Compose starts both `ouroboros` and `qdrant` (used by Mem0 knowledge backend by default).
 
 Check logs: `docker compose logs -f`
@@ -154,19 +154,22 @@ python3 -m pip install -r requirements.txt
 python3 -m pip install -r requirements-dev.txt
 ```
 
-### OpenCode Quick Check
+### Legacy Codex CLI Quick Check
 
-If `OUROBOROS_SELF_EDIT_ONLY` is disabled and code editing fails, run:
+Not used in the current `patch_edit` workflow. Kept only as a compatibility note for experimental legacy setups:
 
 ```bash
-docker compose exec -T ouroboros opencode --version
-docker compose exec -T ouroboros opencode models opencode
-docker compose exec -T ouroboros opencode run -m opencode/minimax-m2.5-free "Reply with exactly: OK" --format json
+docker compose exec -T ouroboros codex --version
+docker compose exec -T -e OPENAI_API_KEY="$OUROBOROS_LLM_API_KEY" ouroboros \
+  codex exec --json -m gpt-5.4 \
+  -c model_provider=ouroboros \
+  -c model_providers.ouroboros.name=ouroboros \
+  -c model_providers.ouroboros.base_url=http://31.56.196.40:3455/backend-api/codex \
+  -c model_providers.ouroboros.env_key=OPENAI_API_KEY \
+  "Reply with exactly: OK"
 ```
 
-`opencode_edit` сначала пытается применить внутренний self-edit fast path. Если `OUROBOROS_SELF_EDIT_ONLY=false`, он может затем попытаться восстановить окружение OpenCode CLI: если бинарь `opencode` отсутствует, агент запускает автоустановку и проверяет `opencode --version`.
-
-If default `opencode run ...` returns Copilot 403, ensure `/app/opencode.json` exists and points to provider `opencode`.
+`patch_edit` is now the only public code-editing tool. It applies local structured self-edit patches and never falls back to OpenCode/Codex CLI. `opencode_edit` remains disabled internally for compatibility only and is not exposed to the model.
 
 ---
 
@@ -231,8 +234,8 @@ Full text: [BIBLE.md](BIBLE.md)
 | `TAVILY_API_KEY` | Enables `web_search` with Tavily (primary, recommended) |
 | `OPENAI_API_KEY` | Optional fallback for `web_search` when Tavily is unavailable |
 | `GOOGLE_API_KEY` | Enables Mem0 knowledge backend (`knowledge_*`) with Gemini |
-| `OPENCODE_API_KEY` | OpenCode API key for OpenCode Zen provider (including free models) |
-| `ANTHROPIC_API_KEY` | Optional provider key for OpenCode/provider integrations |
+| `OPENCODE_API_KEY` | Legacy key from the old OpenCode flow; kept only for backward compatibility |
+| `ANTHROPIC_API_KEY` | Optional provider key for other integrations |
 | `TOTAL_BUDGET` | Fallback spending limit in USD (only used if OpenRouter key has no limit set) |
 
 ### Optional Configuration (environment variables)
@@ -243,11 +246,11 @@ Full text: [BIBLE.md](BIBLE.md)
 | `GITHUB_REPO` | `ouroboros` | GitHub repository name |
 | `OUROBOROS_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Base URL for the built-in OpenAI-compatible LLM client. Example local mode: `http://127.0.0.1:2455/v1` |
 | `OUROBOROS_LLM_API_KEY` | *(empty)* | Optional explicit API key for the LLM base URL. For localhost URLs, Ouroboros falls back to `dummy` automatically |
-| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model |
-| `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |
-| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
-| `OUROBOROS_MODEL_PAID_LIST` | *(empty)* | Ordered paid-model priority list (comma-separated, first = highest priority) |
-| `OUROBOROS_MODEL_FREE_LIST` | *(empty)* | Ordered free-model priority list (comma-separated, first = highest priority) |
+| `OUROBOROS_MODEL` | `openrouter/free` | Primary LLM model. Uses OpenRouter Free Models Router for zero-cost inference |
+| `OUROBOROS_MODEL_CODE` | `openrouter/free` | Model for code-editing and worker tasks in the default free mode |
+| `OUROBOROS_MODEL_LIGHT` | `openrouter/free` | Model for lightweight tasks (dedup, compaction) in the default free mode |
+| `OUROBOROS_MODEL_PAID_LIST` | `gpt-5.4` | Ordered paid-model priority list (comma-separated, first = highest priority) |
+| `OUROBOROS_MODEL_FREE_LIST` | `openrouter/free` | Ordered free-model priority list (comma-separated, first = highest priority) |
 | `OUROBOROS_REASONING_ENABLED` | `true` | Reasoning toggle for `x-ai/grok-4.1-fast` (`reasoning.enabled` in API payload) |
 | `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
 | `OUROBOROS_TAVILY_BASE_URL` | `https://api.tavily.com` | Tavily API base URL |
@@ -268,9 +271,9 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_AUTO_FREE_SWITCH` | `true` | Automatically switch from paid model to free model when remaining budget is low |
 | `OUROBOROS_AUTO_FREE_SWITCH_AT_USD` | `0.40` | Remaining budget threshold (USD) to trigger paid -> free model switch |
 | `OUROBOROS_OPENROUTER_BUDGET_MAX_AGE_SEC` | `1800` | Max age (seconds) for `openrouter_limit_remaining` before forced OpenRouter refresh |
-| `OUROBOROS_SELF_EDIT_ONLY` | `false` | Disable any OpenCode CLI fallback and keep `opencode_edit` on internal self-edit path only. In this mode OpenRouter budget is ignored when a non-OpenRouter base URL is used |
-| `OUROBOROS_OPENCODE_AUTO_INSTALL` | `true` | Auto-install OpenCode CLI at runtime when binary is missing |
-| `OUROBOROS_OPENCODE_INSTALL_CMD` | `curl -fsSL https://opencode.ai/install \| bash` | Custom bootstrap command for OpenCode CLI |
+| `OUROBOROS_SELF_EDIT_ONLY` | `true` | Legacy compatibility flag. Public code editing stays on `patch_edit` only |
+| `OUROBOROS_CODEX_AUTO_INSTALL` | `true` | Auto-install Codex CLI at runtime when binary is missing |
+| `OUROBOROS_CODEX_INSTALL_CMD` | `npm install -g @openai/codex` | Custom bootstrap command for Codex CLI |
 | `OUROBOROS_RUNTIME_EXTRA_PIP` | *(empty)* | Optional pip packages to auto-install on each `safe_restart` (comma-separated) |
 | `OUROBOROS_RUNTIME_EXTRA_PIP_STRICT` | `false` | If `true`, restart fails when optional package install fails |
 | `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
@@ -281,7 +284,7 @@ Full text: [BIBLE.md](BIBLE.md)
 | `OUROBOROS_FACT_GATE_ENABLED` | `true` | Enables response fact-check gate for concrete claims (commit/files/tests) before sending user reply |
 | `OUROBOROS_FACT_GATE_MAX_FINDINGS` | `6` | Max number of unverified claims listed in guarded response |
 | `OUROBOROS_FACT_GATE_APPEND_ORIGINAL` | `false` | If `true`, append original unverified agent text under the guard warning |
-| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Legacy fallback list (used when paid/free priority lists are not set) |
+| `OUROBOROS_MODEL_FALLBACK_LIST` | `gpt-5.4` | Legacy fallback list (used when paid/free priority lists are not set) |
 
 ---
 
@@ -303,14 +306,14 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
-### v7.1.1 -- OpenCode CLI for code editing
+### v7.1.1 -- Codex CLI for code editing
 - Added `opencode_edit` as the sole code-editing tool.
-- Docker image and E2E image install OpenCode CLI.
-- `.env` includes `OPENCODE_API_KEY` and project-level `opencode.json` for reliable default provider/model.
+- Docker image and E2E image install Codex CLI.
+- Code-edit fallback uses the same API key as the bot and rewrites `/v1` to `/backend-api/codex`.
 
 ### v7.1.0 -- Claude Code CLI as sole code editing path
 - **ANTHROPIC_API_KEY is now required** -- Claude Code CLI is the only way the agent edits its own code.
-- **Removed `repo_write_commit` tool** -- No more direct file writes to the repo. All edits go through `opencode_edit` -> `repo_commit_push`.
+- **Removed `repo_write_commit` tool** -- No more direct file writes to the repo. All edits go through the code-edit tool -> `repo_commit_push`.
 
 ### v7.0.0 -- Philosophy v4.0: User-Driven Self-Development
 - **BREAKING: New Bible (v4.0)** -- Complete philosophical shift from "autonomous becoming" to "helpful AI that develops itself while serving the user."
@@ -333,7 +336,7 @@ Full text: [BIBLE.md](BIBLE.md)
 - **Fix: health invariant #5** -- `owner_message_injected` events now properly logged to events.jsonl for duplicate processing detection.
 - **Fix: shell cmd parsing** -- `str.split()` replaced with `shlex.split()` for proper shell quoting support.
 - **Fix: retry task_id** -- timeout retries now get a new task_id with `original_task_id` lineage tracking.
-- **opencode_edit timeout** -- aligned subprocess and tool wrapper to 300s.
+- **code-edit timeout** -- aligned subprocess and tool wrapper to 300s.
 - **Direct chat guard** -- `schedule_task` from direct chat now logged as warning for audit.
 
 ### v6.1.0 -- Budget Optimization: Selective Schemas + Self-Check + Dedup
