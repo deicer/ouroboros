@@ -66,7 +66,7 @@ def test_fact_gate_keeps_text_when_claims_are_supported(tmp_path):
     out = apply_fact_verification_gate(
         text=text,
         repo_dir=repo,
-        llm_trace=llm_trace,
+        llm_trace={},
     )
 
     assert out == text
