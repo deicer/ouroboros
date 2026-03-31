@@ -727,6 +727,27 @@ while True:
                     if b64:
                         image_data = (b64, mime, caption)
 
+        # Voice message handling — download and transcribe
+        voice_transcribed = False
+        if msg.get("voice"):
+            voice_file_id = msg["voice"]["file_id"]
+            try:
+                voice_text = transcribe_voice(voice_file_id, TELEGRAM_BOT_TOKEN, language="ru")
+                if voice_text:
+                    voice_caption = f"[🎤 голосовое: {voice_text}]"
+                    log_chat("in", chat_id, user_id, voice_caption)
+                    text = voice_text
+                    voice_transcribed = True
+                else:
+                    send_with_budget(chat_id, "⚠️ Не удалось распознать голосовое сообщение.")
+                    time.sleep(0.3)
+                    continue
+            except Exception as e:
+                log.warning("Voice transcription error: %s", e, exc_info=True)
+                send_with_budget(chat_id, f"⚠️ Ошибка распознавания голосового: {e}")
+                time.sleep(0.3)
+                continue
+
         st = load_state()
         if st.get("owner_id") is None:
             st["owner_id"] = user_id
