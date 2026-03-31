@@ -132,6 +132,49 @@ def text_to_voice(text: str, voice: str = TTS_VOICE) -> bytes:
         return b""
 
 
+def _mp3_to_ogg(mp3_bytes: bytes) -> bytes:
+    """Convert MP3 bytes (from edge-tts) to OGG Opus format for Telegram.
+    Uses pydub + ffmpeg backend."""
+    try:
+        from pydub import AudioSegment
+        from io import BytesIO
+        audio = AudioSegment.from_mp3(BytesIO(mp3_bytes))
+        buf = BytesIO()
+        audio.export(buf, format="ogg", codec="libopus")
+        return buf.getvalue()
+    except Exception as e:
+        log.warning("MP3→OGG conversion failed: %s", e)
+        return b""
+
+
+def send_voice_message(chat_id: int, text: str,
+                       voice: str = TTS_VOICE) -> bool:
+    """Synthesize text to speech and send as Telegram voice message.
+    Returns True on success, False on failure (fallback to text needed)."""
+    if not chat_id or not text:
+        return False
+    try:
+        mp3_bytes = text_to_voice(text, voice=voice)
+        if not mp3_bytes:
+            return False
+        ogg_bytes = _mp3_to_ogg(mp3_bytes)
+        if not ogg_bytes:
+            return False
+        # Send via /sendVoice
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return False
+        url = f"https://api.telegram.org/bot{token}/sendVoice"
+        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
+        data = {"chat_id": str(chat_id)}
+        resp = requests.post(url, data=data, files=files, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("ok", False)
+    except Exception as e:
+        log.warning("send_voice_message failed: %s", e)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
