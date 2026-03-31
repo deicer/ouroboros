@@ -1,15 +1,18 @@
 """
 Supervisor — Telegram client + formatting.
 
-TelegramClient, message splitting, markdown→HTML conversion, send_with_budget.
+TelegramClient, message splitting, markdown→HTML conversion, send_with_budget,
+voice transcription and text-to-speech.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import os
 import re
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,7 +73,6 @@ def transcribe_voice(file_id: str, token: str, language: str = "ru") -> str:
         model = _get_whisper_model()
 
         # Write to temp file (faster-whisper needs file path)
-        import tempfile
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp.write(audio_data)
             tmp_path = tmp.name
@@ -84,6 +86,50 @@ def transcribe_voice(file_id: str, token: str, language: str = "ru") -> str:
 
     except Exception as e:
         raise RuntimeError(f"Ошибка распознавания голосового: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Text-to-Speech (edge-tts — free, no API key)
+# ---------------------------------------------------------------------------
+
+TTS_VOICE = "ru-RU-SvetlanaNeural"  # female Russian voice; change to DmitryNeural for male
+TTS_MAX_TEXT = 2000  # max characters to synthesize
+_voice_cache: Dict[str, bytes] = {}  # text -> ogg bytes (simple cache for repeated phrases)
+
+
+def text_to_voice(text: str, voice: str = TTS_VOICE) -> bytes:
+    """Convert text to voice audio using edge-tts (free, requires internet).
+    Returns OGG audio bytes suitable for Telegram.
+    Falls back to empty bytes on error."""
+    if not text or len(text) > TTS_MAX_TEXT:
+        return b""
+
+    # Simple cache
+    cache_key = f"{voice}:{text[:500]}"
+    if cache_key in _voice_cache:
+        return _voice_cache[cache_key]
+
+    try:
+        import edge_tts
+
+        async def _synthesize():
+            communicate = edge_tts.Communicate(text, voice=voice, rate="-10%", volume="+10%")
+            audio = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio += chunk["data"]
+            return audio
+
+        audio = asyncio.run(_synthesize())
+
+        # Cache result (limit cache size)
+        if len(_voice_cache) < 100:
+            _voice_cache[cache_key] = audio
+
+        return audio
+    except Exception as e:
+        log.debug("TTS failed: %s", e)
+        return b""
 
 
 # ---------------------------------------------------------------------------
