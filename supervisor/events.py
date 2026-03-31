@@ -8,7 +8,8 @@ Extracted from launcher main loop to keep it under 500 lines.
 from __future__ import annotations
 
 import datetime
-import io\nimport json
+import io
+import json
 import logging
 import os
 import sys
