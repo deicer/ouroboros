@@ -306,6 +306,11 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.2.0 -- Голосовые сообщения в Telegram
+- Добавлен метод `transcribe_voice()` в `supervisor/telegram.py` — транскрипция через faster-whisper
+- Голосовые сообщения обрабатываются в polling loop и batch mode
+- `faster-whisper` установлен в Docker образ
+
 ### v7.1.1 -- Codex CLI for code editing
 - Added `opencode_edit` as the sole code-editing tool.
 - Docker image and E2E image install Codex CLI.
