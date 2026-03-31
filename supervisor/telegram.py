@@ -154,7 +154,7 @@ class TelegramClient:
                 r = requests.get(
                     f"{self.base}/getUpdates",
                     params={"offset": offset, "timeout": timeout,
-                            "allowed_updates": ["message", "edited_message"]},
+                            "allowed_updates": ["message", "edited_message", "voice"]},
                     timeout=timeout + 5,
                 )
                 data: Dict[str, Any] = {}
