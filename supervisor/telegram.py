@@ -22,6 +22,71 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Voice transcription (faster-whisper)
+# ---------------------------------------------------------------------------
+
+_WHISPER_MODEL = None
+WHISPER_MODEL_NAME = "tiny"  # tiny is fast and good enough for voice commands
+VOICE_TIMEOUT_SEC = 30  # max seconds for voice transcription
+VOICE_FILE_SIZE_LIMIT = 25_000_000  # 25MB max voice file size
+
+
+def _get_whisper_model():
+    """Lazy-load Whisper model (faster-whisper)."""
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        try:
+            from faster_whisper import WhisperModel
+            _WHISPER_MODEL = WhisperModel(WHISPER_MODEL_NAME, device="cpu", compute_type="int8")
+        except ImportError:
+            raise RuntimeError("faster-whisper не установлен. pip install faster-whisper")
+    return _WHISPER_MODEL
+
+
+def transcribe_voice(file_id: str, token: str, language: str = "ru") -> str:
+    """Download Telegram voice message and transcribe it.
+    Returns the transcribed text, or raises an exception."""
+    try:
+        # Download file from Telegram
+        base = f"https://api.telegram.org/bot{token}"
+        r = requests.get(f"{base}/getFile", params={"file_id": file_id}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(f"Telegram getFile failed: {data}")
+
+        file_path = data["result"].get("file_path", "")
+        file_size = int(data["result"].get("file_size") or 0)
+        if file_size > VOICE_FILE_SIZE_LIMIT:
+            raise ValueError(f"Файл слишком большой ({file_size} байт)")
+
+        # Download audio file
+        download_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        r = requests.get(download_url, timeout=30)
+        r.raise_for_status()
+        audio_data = r.content
+
+        # Transcribe using faster-whisper
+        model = _get_whisper_model()
+
+        # Write to temp file (faster-whisper needs file path)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp.write(audio_data)
+            tmp_path = tmp.name
+
+        try:
+            segments, info = model.transcribe(tmp_path, language=language if language != "auto" else None, beam_size=1)
+            text = "".join(seg.text for seg in segments).strip()
+            return text
+        finally:
+            os.unlink(tmp_path)
+
+    except Exception as e:
+        raise RuntimeError(f"Ошибка распознавания голосового: {e}") from e
+
+
+# ---------------------------------------------------------------------------
 # Module-level config (set via init())
 # ---------------------------------------------------------------------------
 DRIVE_ROOT = None  # pathlib.Path
