@@ -189,6 +189,7 @@ init_state()
 
 from supervisor.telegram import (
     init as telegram_init, TelegramClient, send_with_budget, log_chat,
+    transcribe_voice,
 )
 TG = TelegramClient(str(TELEGRAM_BOT_TOKEN))
 telegram_init(
