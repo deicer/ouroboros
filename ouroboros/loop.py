@@ -23,6 +23,8 @@ from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.llm import (
     LLMClient,
     add_usage,
+    build_prompt_cache_key,
+    build_response_session_id,
     get_code_model_from_env,
     get_fallback_models_from_env,
     get_free_models_from_env,
@@ -146,18 +148,43 @@ READ_ONLY_LOOP_TOOLS = frozenset({
 
 # Stateful browser tools require thread-affinity (Playwright sync uses greenlet)
 STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
+_DEFAULT_TOOL_RESULT_HISTORY_CAP = 15000
+_NOISY_TOOL_RESULT_HISTORY_CAPS = {
+    "patch_edit": 1500,
+    "run_shell": 2500,
+    "repo_commit_push": 1800,
+    "git_diff": 1800,
+    "git_status": 1000,
+    "git_repo_health": 1200,
+}
 
 
-def _truncate_tool_result(result: Any) -> str:
+def _assistant_content_for_history(content: Optional[str], tool_calls: List[Dict[str, Any]]) -> str:
     """
-    Hard-cap tool result string to 15000 characters.
+    Keep assistant tool-use history structurally stable for prompt caching.
+
+    Human-facing progress text is still emitted via emit_progress/thinking_trace,
+    but the rolling LLM history stores only the actual tool calls.
+    """
+    if tool_calls:
+        return ""
+    return str(content or "")
+
+
+def _truncate_tool_result(result: Any, tool_name: str = "") -> str:
+    """
+    Hard-cap tool result string for message history.
+
+    Most tools use a generous default limit, but especially noisy tools
+    (shell/edit/git helpers) use smaller caps to reduce prompt churn.
     If truncated, append a note with the original length.
     """
     result_str = str(result)
-    if len(result_str) <= 15000:
+    cap = int(_NOISY_TOOL_RESULT_HISTORY_CAPS.get(str(tool_name or "").strip(), _DEFAULT_TOOL_RESULT_HISTORY_CAP))
+    if len(result_str) <= cap:
         return result_str
     original_len = len(result_str)
-    return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
+    return result_str[:cap] + f"\n... (truncated from {original_len} chars)"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -256,6 +283,21 @@ def _is_paid_limit_error(error: Exception) -> bool:
         "402",
     )
     return any(m in text for m in markers)
+
+
+def _no_distinct_fallback_message(active_model: str, max_retries: int) -> str:
+    model = str(active_model or "").strip() or "<unknown>"
+    router_note = ""
+    if model.lower().endswith("/free"):
+        router_note = (
+            " The active model is already a router alias, so the empty response came from the router itself "
+            "rather than from a missing model-specific override."
+        )
+    return (
+        f"⚠️ Failed to get a response from model {model} after {max_retries} attempts. "
+        f"No distinct fallback model is configured.{router_note} "
+        "Try rephrasing your request or add another fallback model in the environment."
+    )
 
 
 _DEFAULT_MODEL_CONTEXT_WINDOW = 200_000
@@ -868,14 +910,33 @@ def _maybe_auto_compact_context(
         return messages
 
 
+def _maybe_compact_history_messages(
+    *,
+    messages: List[Dict[str, Any]],
+    round_idx: int,
+    pending_keep_recent: Optional[int],
+) -> List[Dict[str, Any]]:
+    """
+    Compact task history only when needed.
+
+    Prompt caching benefits from a stable prefix, so round count alone should not
+    rewrite earlier messages. Explicit LLM-requested compaction still wins.
+    """
+    if pending_keep_recent is not None:
+        return compact_tool_history_llm(messages, keep_recent=pending_keep_recent)
+    if round_idx > 3 and len(messages) > 60:
+        return compact_tool_history(messages, keep_recent=6)
+    return messages
+
+
 def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
     """
     Wire tool-discovery handlers onto an existing tool_schemas list.
 
     Creates closures for list_available_tools / enable_tools, registers them
     as handler overrides, and injects a system message advertising non-core
-    tools.  Mutates tool_schemas in-place (via list.append) when tools are
-    enabled, so the caller's reference stays live.
+    tools. Current-task tool schemas stay fixed; enable_tools only queues
+    additional tools for the next task.
 
     Returns (tool_schemas, enabled_extra_set).
     """
@@ -895,17 +956,26 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
         enabled, not_found = [], []
         for name in names:
             schema = tools_registry.get_schema_by_name(name)
-            if schema and name not in enabled_extra:
-                tool_schemas.append(schema)
-                enabled_extra.add(name)
+            if schema:
                 enabled.append(name)
-            elif name in enabled_extra:
-                enabled.append(f"{name} (already active)")
             else:
                 not_found.append(name)
+        queued = []
+        queue_fn = getattr(tools_registry, "queue_tools_for_next_task", None)
+        if callable(queue_fn) and enabled:
+            queued_result = queue_fn(enabled)
+            queued = enabled if queued_result is None else queued_result
         parts = []
-        if enabled:
-            parts.append(f"✅ Enabled: {', '.join(enabled)}")
+        if queued:
+            parts.append(
+                "✅ Queued for next task (current task toolset stays fixed for cache stability): "
+                + ", ".join(queued)
+            )
+        elif enabled:
+            parts.append(
+                "ℹ️ Tools already available to queue, but no new tool names were added for the next task: "
+                + ", ".join(enabled)
+            )
         if not_found:
             parts.append(f"❌ Not found: {', '.join(not_found)}")
         return "\n".join(parts) if parts else "No tools specified."
@@ -926,6 +996,50 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
         })
 
     return tool_schemas, enabled_extra
+
+
+def _consume_queued_tool_schemas(tools_registry, tool_schemas):
+    consume_fn = getattr(tools_registry, "consume_queued_tools_for_task", None)
+    if not callable(consume_fn):
+        return tool_schemas
+    queued = consume_fn() or []
+    if not queued:
+        return tool_schemas
+    existing = {
+        str((schema or {}).get("function", {}).get("name") or "").strip()
+        for schema in tool_schemas
+    }
+    for schema in queued:
+        name = str((schema or {}).get("function", {}).get("name") or "").strip()
+        if name and name not in existing:
+            tool_schemas.append(schema)
+            existing.add(name)
+    return tool_schemas
+
+
+def _load_runtime_session_id(drive_root: Optional[pathlib.Path]) -> str:
+    if drive_root is None:
+        return ""
+    try:
+        state_path = pathlib.Path(drive_root) / "state" / "state.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return str(payload.get("session_id") or "").strip()
+    except Exception:
+        log.debug("Failed to load runtime session_id for prompt cache key", exc_info=True)
+    return ""
+
+
+def _tool_schema_names(tool_schemas: List[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for schema in tool_schemas:
+        name = str((schema or {}).get("function", {}).get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def _drain_incoming_messages(
@@ -1025,7 +1139,18 @@ def run_llm_loop(
 
     # Selective tool schemas: core set + meta-tools for discovery.
     tool_schemas = tools.schemas(core_only=True)
+    tool_schemas = _consume_queued_tool_schemas(tools, tool_schemas)
     tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
+    toolset_names = _tool_schema_names(tool_schemas)
+    runtime_session_id = _load_runtime_session_id(drive_root)
+    task_session_id = build_response_session_id(
+        scope="task_loop",
+        runtime_session_id=runtime_session_id,
+        task_id=task_id,
+    )
+
+    def _current_prompt_cache_key(_model_name: str) -> str:
+        return task_session_id
 
     # Set budget tracking on tool context for real-time usage events
     tools._ctx.event_queue = event_queue
@@ -1168,6 +1293,8 @@ def run_llm_loop(
                         llm, messages, active_model, None, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         on_api_error=_on_llm_api_error,
+                        prompt_cache_key=_current_prompt_cache_key(active_model),
+                        session_id=task_session_id,
                     )
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
@@ -1261,6 +1388,8 @@ def run_llm_loop(
                         llm, messages, active_model, None, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         on_api_error=_on_llm_api_error,
+                        prompt_cache_key=_current_prompt_cache_key(active_model),
+                        session_id=task_session_id,
                     )
                     if final_msg and str(final_msg.get("content") or "").strip():
                         return str(final_msg.get("content") or ""), accumulated_usage, llm_trace
@@ -1272,21 +1401,21 @@ def run_llm_loop(
             # Compact old tool history when needed
             # Check for LLM-requested compaction first (via compact_context tool)
             pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
+            messages = _maybe_compact_history_messages(
+                messages=messages,
+                round_idx=round_idx,
+                pending_keep_recent=pending_compaction,
+            )
             if pending_compaction is not None:
-                messages = compact_tool_history_llm(messages, keep_recent=pending_compaction)
                 tools._ctx._pending_compaction = None
-            elif round_idx > 8:
-                messages = compact_tool_history(messages, keep_recent=6)
-            elif round_idx > 3:
-                # Light compaction: only if messages list is very long (>60 items)
-                if len(messages) > 60:
-                    messages = compact_tool_history(messages, keep_recent=6)
 
             # --- LLM call with retry ---
             msg, _ = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 on_api_error=_on_llm_api_error,
+                prompt_cache_key=_current_prompt_cache_key(active_model),
+                session_id=task_session_id,
             )
 
             # Fallback to another model if primary model returns empty responses
@@ -1311,10 +1440,7 @@ def run_llm_loop(
                         round_idx=round_idx,
                         details={"active_model": active_model, "reason": "no_distinct_fallback_model"},
                     )
-                    return (
-                        f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
-                        f"All fallback models match the active one. Try rephrasing your request."
-                    ), accumulated_usage, llm_trace
+                    return _no_distinct_fallback_message(active_model, max_retries), accumulated_usage, llm_trace
 
                 # Emit progress message so user sees fallback happening
                 fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model} after empty response"
@@ -1334,6 +1460,8 @@ def run_llm_loop(
                     llm, messages, fallback_model, tool_schemas, active_effort,
                     max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                     on_api_error=_on_llm_api_error,
+                    prompt_cache_key=_current_prompt_cache_key(fallback_model),
+                    session_id=task_session_id,
                 )
 
                 # If fallback also fails, give up
@@ -1396,7 +1524,11 @@ def run_llm_loop(
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
             # Process tool calls
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            messages.append({
+                "role": "assistant",
+                "content": _assistant_content_for_history(content, tool_calls),
+                "tool_calls": tool_calls,
+            })
 
             if content and content.strip():
                 emit_progress(content.strip())
@@ -1478,6 +1610,8 @@ def run_llm_loop(
                         llm, messages, active_model, None, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         on_api_error=_on_llm_api_error,
+                        prompt_cache_key=_current_prompt_cache_key(active_model),
+                        session_id=task_session_id,
                     )
                     if final_msg and str(final_msg.get("content") or "").strip():
                         return str(final_msg.get("content") or ""), accumulated_usage, llm_trace
@@ -1728,6 +1862,8 @@ def _call_llm_with_retry(
     accumulated_usage: Dict[str, Any],
     task_type: str = "",
     on_api_error: Optional[Callable[[str, Exception], bool]] = None,
+    prompt_cache_key: str = "",
+    session_id: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Call LLM with retry logic, usage tracking, and event emission.
@@ -1739,7 +1875,13 @@ def _call_llm_with_retry(
     msg = None
     for attempt in range(max_retries):
         try:
-            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
+            kwargs = {
+                "messages": messages,
+                "model": model,
+                "reasoning_effort": effort,
+                "prompt_cache_key": prompt_cache_key,
+                "session_id": session_id,
+            }
             if tools:
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)
@@ -1856,7 +1998,7 @@ def _process_tool_results(
             error_count += 1
 
         # Truncate tool result before appending to messages
-        truncated_result = _truncate_tool_result(exec_result["result"])
+        truncated_result = _truncate_tool_result(exec_result["result"], tool_name=fn_name)
 
         # Append tool result message
         messages.append({
@@ -1923,7 +2065,7 @@ def _auto_commit_enabled() -> bool:
 
 def _auto_commit_tool_set() -> set[str]:
     raw = str(
-        os.environ.get("OUROBOROS_AUTO_COMMIT_TOOLS", "opencode_edit,run_shell") or ""
+        os.environ.get("OUROBOROS_AUTO_COMMIT_TOOLS", "patch_edit,run_shell") or ""
     ).strip()
     if not raw:
         return set()

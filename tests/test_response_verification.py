@@ -72,6 +72,23 @@ def test_fact_gate_keeps_text_when_claims_are_supported(tmp_path):
     assert out == text
 
 
+def test_fact_gate_accepts_absolute_repo_path_claim(tmp_path):
+    repo = tmp_path / "app"
+    repo.mkdir(parents=True, exist_ok=True)
+    smoke_file = repo / "opencode_smoke_test.txt"
+    smoke_file.write_text("ok\n", encoding="utf-8")
+
+    text = "Создан файл /app/opencode_smoke_test.txt."
+
+    out = apply_fact_verification_gate(
+        text=text,
+        repo_dir=repo,
+        llm_trace={},
+    )
+
+    assert out == text
+
+
 def test_fact_gate_accepts_successful_run_shell_output_without_pytest_word(tmp_path):
     text = "Все тесты прошли успешно."
     llm_trace = {

@@ -330,7 +330,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _summarize_dialogue(ctx: ToolContext, last_n: int = 200) -> str:
     """Summarize dialogue history into key moments, decisions, and user preferences."""
-    from ouroboros.llm import LLMClient, get_light_model_from_env
+    from ouroboros.llm import LLMClient, build_response_session_id, get_light_model_from_env
 
     # Read last_n messages from chat.jsonl
     chat_path = ctx.drive_root / "logs" / "chat.jsonl"
@@ -388,15 +388,29 @@ Now write a comprehensive summary:"""
         # Call LLM
         llm = LLMClient()
         model = get_light_model_from_env()
+        session_id = ""
+        try:
+            state_payload = json.loads(read_text(ctx.drive_root / "state" / "state.json"))
+            if isinstance(state_payload, dict):
+                session_id = str(state_payload.get("session_id") or "").strip()
+        except Exception:
+            log.debug("Failed to load session_id for summarize_dialogue prompt cache", exc_info=True)
 
         messages = [
             {"role": "user", "content": prompt}
         ]
+        response_session_id = build_response_session_id(
+            scope="summarize_dialogue",
+            runtime_session_id=session_id,
+            task_id=str(ctx.task_id or "").strip(),
+        )
 
         response, usage = llm.chat(
             messages=messages,
             model=model,
             max_tokens=4096,
+            prompt_cache_key=response_session_id,
+            session_id=response_session_id,
         )
 
         # Track cost in budget system
@@ -405,9 +419,17 @@ Now write a comprehensive summary:"""
                 "type": "llm_usage",
                 "ts": utc_now_iso(),
                 "task_id": ctx.task_id if ctx.task_id else "",
+                "model": model,
+                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                "cached_tokens": int(usage.get("cached_tokens", 0) or 0),
+                "cache_write_tokens": int(usage.get("cache_write_tokens", 0) or 0),
+                "cost": float(usage.get("cost", 0) or 0),
                 "usage": {
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
+                    "cached_tokens": usage.get("cached_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_write_tokens", 0),
                     "cost": usage.get("cost", 0),
                 },
                 "category": "summarize",

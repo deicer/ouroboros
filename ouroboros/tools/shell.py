@@ -1,4 +1,4 @@
-"""Shell tools: run_shell, opencode_edit."""
+"""Shell tools: run_shell, patch_edit."""
 
 from __future__ import annotations
 
@@ -13,10 +13,11 @@ import shutil
 import subprocess
 import time
 import uuid
-from typing import Any, Dict, List
+from urllib.parse import urlparse, urlunparse
+from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import append_jsonl, run_cmd, safe_resolve_under_root, truncate_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, read_text, run_cmd, safe_resolve_under_root, truncate_for_log, utc_now_iso, write_text
 
 log = logging.getLogger(__name__)
 
@@ -52,19 +53,32 @@ def _truncate_output_bytes(text: str, limit_bytes: int) -> str:
     return head + f"\n...(truncated at {limit_bytes} bytes)...\n" + tail
 
 
+def _env_first(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    return default
+
+
 def _is_opencode_cli_invocation(cmd: List[str]) -> bool:
     if not cmd:
         return False
     first = pathlib.Path(str(cmd[0] or "").strip()).name.lower()
-    if first in {"opencode", "opencode.exe"}:
+    if first in {"opencode", "opencode.exe", "codex", "codex.exe"}:
         return True
     if first in {"bash", "sh", "zsh"} and len(cmd) >= 3:
         script = str(cmd[2] or "").lower()
-        if "opencode " in script or script.strip().startswith("opencode"):
+        if (
+            "opencode " in script
+            or script.strip().startswith("opencode")
+            or "codex " in script
+            or script.strip().startswith("codex")
+        ):
             return True
     if first in {"npx", "npm", "pnpm", "yarn", "bun"} and len(cmd) >= 2:
         second = pathlib.Path(str(cmd[1] or "").strip()).name.lower()
-        if second in {"opencode", "@opencode/cli"}:
+        if second in {"opencode", "@opencode/cli", "codex", "@openai/codex"}:
             return True
     return False
 
@@ -116,8 +130,8 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
 
     if _is_opencode_cli_invocation(cmd):
         msg = (
-            "⚠️ RUN_SHELL_POLICY: Не запускай OpenCode CLI через run_shell. "
-            "Для правок кода используй tool opencode_edit; run_shell оставь для проверок/тестов."
+            "⚠️ RUN_SHELL_POLICY: Не запускай OpenCode/Codex CLI через run_shell. "
+            "Для правок кода используй tool patch_edit; run_shell оставь для проверок/тестов."
         )
         try:
             append_jsonl(ctx.drive_logs() / "events.jsonl", {
@@ -158,12 +172,55 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return f"⚠️ SHELL_ERROR: {e}"
 
 
-def _build_opencode_cmd(prompt: str, model: str = "") -> List[str]:
-    """Build OpenCode command for non-interactive code edits."""
-    cmd = [shutil.which("opencode") or "opencode", "run"]
-    if model and str(model).strip():
-        cmd.extend(["-m", str(model).strip()])
-    cmd.extend([prompt, "--format", "json"])
+def _codex_cli_base_url() -> str:
+    explicit = _env_first("OUROBOROS_CODEX_CLI_BASE_URL", default="")
+    if explicit:
+        return explicit
+
+    llm_base = _env_first("OUROBOROS_LLM_BASE_URL", default="")
+    if not llm_base:
+        return ""
+
+    parsed = urlparse(llm_base)
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/backend-api/codex"):
+        new_path = path
+    else:
+        if path.endswith("/v1"):
+            path = path[:-3]
+        new_path = (path.rstrip("/") + "/backend-api/codex") or "/backend-api/codex"
+    return urlunparse(parsed._replace(path=new_path, params="", query="", fragment=""))
+
+
+def _codex_cli_model(default: str = "") -> str:
+    return (
+        str(default or "").strip()
+        or _env_first("OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL", default="gpt-5.4")
+    )
+
+
+def _build_opencode_cmd(
+    prompt: str,
+    model: str = "",
+    session_id: str = "",
+    work_dir: str = "",
+) -> List[str]:
+    """Build Codex CLI command for non-interactive code edits."""
+    cmd = [shutil.which("codex") or "codex"]
+    if str(work_dir or "").strip():
+        cmd.extend(["-C", str(work_dir).strip()])
+    cmd.append("exec")
+    if session_id:
+        cmd.extend(["resume", "--json"])
+    else:
+        cmd.append("--json")
+    resolved_model = _codex_cli_model(model)
+    if resolved_model:
+        cmd.extend(["-m", resolved_model])
+    cmd.extend(["--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"])
+    if session_id:
+        cmd.append(str(session_id).strip())
+    cmd.append(prompt)
     return cmd
 
 
@@ -172,10 +229,27 @@ def _run_opencode_cli(
     prompt: str,
     env: dict,
     model: str = "",
+    session_id: str = "",
     timeout_sec: int = 120,
 ) -> subprocess.CompletedProcess:
-    """Run OpenCode in non-interactive mode and return subprocess result."""
-    cmd = _build_opencode_cmd(prompt=prompt, model=model)
+    """Run Codex CLI in non-interactive mode and return subprocess result."""
+    cmd = _build_opencode_cmd(
+        prompt=prompt,
+        model=model,
+        session_id=session_id,
+        work_dir=work_dir,
+    )
+    prompt_arg = cmd.pop()
+    provider_name = "ouroboros"
+    base_url = _codex_cli_base_url()
+    if base_url:
+        cmd.extend([
+            "-c", f"model_provider={provider_name}",
+            "-c", f"model_providers.{provider_name}.name={provider_name}",
+            "-c", f"model_providers.{provider_name}.base_url={base_url}",
+            "-c", f"model_providers.{provider_name}.env_key=OPENAI_API_KEY",
+        ])
+    cmd.append(prompt_arg)
     return subprocess.run(
         cmd,
         cwd=work_dir,
@@ -184,6 +258,119 @@ def _run_opencode_cli(
         timeout=max(15, int(timeout_sec)),
         env=env,
     )
+
+
+def _codex_home_dir(ctx: ToolContext) -> pathlib.Path:
+    return (ctx.drive_root / "codex_home").resolve()
+
+
+def _codex_task_session_file(ctx: ToolContext) -> Optional[pathlib.Path]:
+    task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    if not task_id:
+        return None
+    return (ctx.drive_root / "state" / "codex_task_sessions" / f"{task_id}.json").resolve()
+
+
+def _load_codex_task_session(ctx: ToolContext) -> Dict[str, Any]:
+    path = _codex_task_session_file(ctx)
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(read_text(path))
+    except Exception:
+        log.debug("Failed to read codex task session file %s", path, exc_info=True)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_codex_task_session(ctx: ToolContext, payload: Dict[str, Any]) -> None:
+    path = _codex_task_session_file(ctx)
+    if path is None:
+        return
+    current = _load_codex_task_session(ctx)
+    merged: Dict[str, Any] = {}
+    if isinstance(current, dict):
+        merged.update(current)
+    merged.update(payload)
+    merged["task_id"] = str(getattr(ctx, "task_id", "") or "").strip()
+    merged["updated_at"] = utc_now_iso()
+    write_text(path, json.dumps(merged, ensure_ascii=False, indent=2))
+
+
+def _resolve_opencode_requested_work_dir(ctx: ToolContext, cwd: str = "") -> str:
+    work_dir = str(ctx.repo_dir.resolve())
+    raw_cwd = str(cwd or "").strip()
+    if raw_cwd in {"", ".", "./"}:
+        return work_dir
+    try:
+        candidate = safe_resolve_under_root(ctx.repo_dir, raw_cwd)
+    except ValueError:
+        return work_dir
+    if candidate.exists() and candidate.is_dir():
+        return str(candidate.resolve())
+    return work_dir
+
+
+def _resolve_opencode_session_work_dir(ctx: ToolContext, session_state: Dict[str, Any]) -> str:
+    stored = str((session_state or {}).get("work_dir") or "").strip()
+    if not stored:
+        return ""
+    root_resolved = ctx.repo_dir.resolve()
+    try:
+        raw_path = pathlib.Path(stored)
+        if raw_path.is_absolute():
+            candidate = raw_path.resolve()
+            if candidate != root_resolved and root_resolved not in candidate.parents:
+                return ""
+        else:
+            candidate = safe_resolve_under_root(ctx.repo_dir, stored)
+    except ValueError:
+        return ""
+    if candidate.exists() and candidate.is_dir():
+        return str(candidate.resolve())
+    return ""
+
+
+def _choose_opencode_work_dir(
+    ctx: ToolContext,
+    *,
+    cwd: str = "",
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    requested_work_dir = _resolve_opencode_requested_work_dir(ctx, cwd=cwd)
+    state = session_state if isinstance(session_state, dict) else {}
+    active_session_id = str(state.get("current_session_id") or "").strip()
+    session_work_dir = _resolve_opencode_session_work_dir(ctx, state)
+    if active_session_id and session_work_dir:
+        return session_work_dir
+    return requested_work_dir
+
+
+def _extract_opencode_thread_id(stdout: str) -> str:
+    text = (stdout or "").strip()
+    if not text:
+        return ""
+    for line in text.splitlines():
+        ln = line.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get("type") or "").strip() == "thread.started":
+            thread_id = str(obj.get("thread_id") or "").strip()
+            if thread_id:
+                return thread_id
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return ""
+    if isinstance(payload, dict) and str(payload.get("type") or "").strip() == "thread.started":
+        return str(payload.get("thread_id") or "").strip()
+    return ""
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -199,7 +386,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 def _self_edit_only_enabled() -> bool:
-    return _env_bool("OUROBOROS_SELF_EDIT_ONLY", default=False)
+    return _env_bool("OUROBOROS_SELF_EDIT_ONLY", default=True)
+
+
+def _code_edit_auto_install_enabled() -> bool:
+    raw = _env_first("OUROBOROS_CODEX_AUTO_INSTALL", "OUROBOROS_OPENCODE_AUTO_INSTALL", default="")
+    if not raw:
+        return True
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _append_tool_event(ctx: ToolContext, payload: Dict[str, Any]) -> None:
@@ -235,21 +429,24 @@ def _ensure_opencode_cli(
     env: Dict[str, str],
     timeout_sec: int = 150,
 ) -> tuple[bool, str]:
-    """Best-effort bootstrap for OpenCode CLI inside runtime container."""
-    opencode_path = shutil.which("opencode", path=env.get("PATH", ""))
-    if opencode_path:
-        return True, opencode_path
+    """Best-effort bootstrap for Codex CLI inside runtime container."""
+    codex_path = shutil.which("codex", path=env.get("PATH", ""))
+    if codex_path:
+        return True, codex_path
 
-    if not _env_bool("OUROBOROS_OPENCODE_AUTO_INSTALL", default=True):
-        msg = "opencode not found in PATH and auto-install is disabled (OUROBOROS_OPENCODE_AUTO_INSTALL=0)."
+    if not _code_edit_auto_install_enabled():
+        msg = (
+            "codex not found in PATH and auto-install is disabled "
+            "(OUROBOROS_CODEX_AUTO_INSTALL=0)."
+        )
         _append_tool_event(ctx, {"ok": False, "stage": "disabled", "error": msg})
         return False, msg
 
     install_cmd = (
-        os.environ.get("OUROBOROS_OPENCODE_INSTALL_CMD", "").strip()
-        or "curl -fsSL https://opencode.ai/install | bash"
+        _env_first("OUROBOROS_CODEX_INSTALL_CMD", "OUROBOROS_OPENCODE_INSTALL_CMD", default="")
+        or "npm install -g @openai/codex"
     )
-    ctx.emit_progress_fn("OpenCode CLI не найден, пробую автоустановку...")
+    ctx.emit_progress_fn("Codex CLI не найден, пробую автоустановку...")
     try:
         install_res = subprocess.run(
             ["bash", "-lc", install_cmd],
@@ -260,11 +457,11 @@ def _ensure_opencode_cli(
             timeout=max(30, int(timeout_sec)),
         )
     except subprocess.TimeoutExpired:
-        msg = f"OpenCode install timed out after {timeout_sec}s."
+        msg = f"Codex CLI install timed out after {timeout_sec}s."
         _append_tool_event(ctx, {"ok": False, "stage": "install", "error": msg})
         return False, msg
     except Exception as e:
-        msg = f"OpenCode install failed: {type(e).__name__}: {e}"
+        msg = f"Codex CLI install failed: {type(e).__name__}: {e}"
         _append_tool_event(ctx, {"ok": False, "stage": "install", "error": msg})
         return False, msg
 
@@ -272,7 +469,7 @@ def _ensure_opencode_cli(
         stdout = truncate_for_log((install_res.stdout or "").strip(), 1200)
         stderr = truncate_for_log((install_res.stderr or "").strip(), 1200)
         msg = (
-            f"OpenCode install exited {install_res.returncode}. "
+            f"Codex CLI install exited {install_res.returncode}. "
             f"stdout={stdout or '-'} stderr={stderr or '-'}"
         )
         _append_tool_event(
@@ -286,15 +483,15 @@ def _ensure_opencode_cli(
         )
         return False, msg
 
-    opencode_path = shutil.which("opencode", path=env.get("PATH", ""))
-    if not opencode_path:
-        msg = "OpenCode install completed but binary still missing in PATH."
+    codex_path = shutil.which("codex", path=env.get("PATH", ""))
+    if not codex_path:
+        msg = "Codex CLI install completed but binary still missing in PATH."
         _append_tool_event(ctx, {"ok": False, "stage": "which", "error": msg})
         return False, msg
 
     try:
         version_res = subprocess.run(
-            [opencode_path, "--version"],
+            [codex_path, "--version"],
             cwd=work_dir,
             env=env,
             capture_output=True,
@@ -303,7 +500,7 @@ def _ensure_opencode_cli(
         )
         if version_res.returncode != 0:
             msg = (
-                f"OpenCode installed at {opencode_path}, "
+                f"Codex CLI installed at {codex_path}, "
                 f"but --version failed (exit={version_res.returncode})."
             )
             _append_tool_event(
@@ -317,16 +514,16 @@ def _ensure_opencode_cli(
             )
             return False, msg
     except Exception as e:
-        msg = f"OpenCode verify failed: {type(e).__name__}: {e}"
+        msg = f"Codex CLI verify failed: {type(e).__name__}: {e}"
         _append_tool_event(ctx, {"ok": False, "stage": "verify", "error": msg})
         return False, msg
 
-    _append_tool_event(ctx, {"ok": True, "stage": "ready", "path": opencode_path})
-    return True, opencode_path
+    _append_tool_event(ctx, {"ok": True, "stage": "ready", "path": codex_path})
+    return True, codex_path
 
 
 def _opencode_has_error_payload(stdout: str) -> bool:
-    """Return True when OpenCode returned an explicit JSON error payload."""
+    """Return True when code-edit CLI returned an explicit JSON error payload."""
     text = (stdout or "").strip()
     if not text:
         return False
@@ -357,7 +554,7 @@ def _is_copilot_reauth_error(stdout: str, stderr: str) -> bool:
 
 
 def _opencode_fallback_models() -> List[str]:
-    raw = os.environ.get("OUROBOROS_OPENCODE_FALLBACK_MODELS", "")
+    raw = _env_first("OUROBOROS_CODEX_FALLBACK_MODELS", "OUROBOROS_OPENCODE_FALLBACK_MODELS", default="")
     models = [m.strip() for m in raw.split(",") if m.strip()] if raw else []
     # stable dedup preserving order
     dedup: List[str] = []
@@ -371,8 +568,14 @@ def _opencode_fallback_models() -> List[str]:
 
 
 def _opencode_prompt_limits() -> tuple[int, int]:
-    max_chars = int(os.environ.get("OUROBOROS_OPENCODE_MAX_PROMPT_CHARS", "3500") or "3500")
-    max_lines = int(os.environ.get("OUROBOROS_OPENCODE_MAX_PROMPT_LINES", "120") or "120")
+    max_chars = int(
+        _env_first("OUROBOROS_CODEX_MAX_PROMPT_CHARS", "OUROBOROS_OPENCODE_MAX_PROMPT_CHARS", default="12000")
+        or "12000"
+    )
+    max_lines = int(
+        _env_first("OUROBOROS_CODEX_MAX_PROMPT_LINES", "OUROBOROS_OPENCODE_MAX_PROMPT_LINES", default="300")
+        or "300"
+    )
     return max(500, max_chars), max(20, max_lines)
 
 
@@ -431,24 +634,24 @@ def _format_prompt_too_large_message(prompt: str) -> str:
         for idx, step in enumerate(steps, start=1):
             lines.append(f"{idx}. {truncate_for_log(step, 220)}")
     lines.append(
-        "Config: OUROBOROS_OPENCODE_MAX_PROMPT_CHARS, OUROBOROS_OPENCODE_MAX_PROMPT_LINES."
+        "Config: OUROBOROS_CODEX_MAX_PROMPT_CHARS, OUROBOROS_CODEX_MAX_PROMPT_LINES."
     )
     return "\n".join(lines)
 
 
-def _append_tool_stats(ctx: ToolContext, payload: Dict[str, Any]) -> None:
+def _append_tool_stats(ctx: ToolContext, payload: Dict[str, Any], tool_name: str = "patch_edit") -> None:
     """Append tool execution metrics for observability."""
     try:
         append_jsonl(
             ctx.drive_logs() / "tools_stats.jsonl",
             {
                 "ts": utc_now_iso(),
-                "tool": "opencode_edit",
+                "tool": tool_name,
                 **payload,
             },
         )
     except Exception:
-        log.debug("Failed to append tools_stats.jsonl for opencode_edit", exc_info=True)
+        log.debug("Failed to append tools_stats.jsonl for %s", tool_name, exc_info=True)
 
 
 def _strip_wrapped_quotes(value: str) -> str:
@@ -461,13 +664,29 @@ def _strip_wrapped_quotes(value: str) -> str:
 def _parse_fast_edit_prompt(prompt: str) -> Dict[str, Any]:
     """Parse simple single-file replace instruction from prompt."""
     fields: Dict[str, str] = {}
+    current_key = ""
+    current_lines: List[str] = []
+
+    def _flush() -> None:
+        nonlocal current_key, current_lines
+        if not current_key:
+            return
+        value = "\n".join(current_lines).rstrip("\n").strip()
+        fields[current_key] = _strip_wrapped_quotes(value)
+        current_key = ""
+        current_lines = []
+
     for raw_line in str(prompt or "").splitlines():
         m = re.match(r"^\s*(FILE|REPLACE|WITH|COUNT)\s*:\s*(.*?)\s*$", raw_line, re.IGNORECASE)
-        if not m:
+        if m:
+            _flush()
+            current_key = m.group(1).lower()
+            initial_value = m.group(2)
+            current_lines = [initial_value] if initial_value else []
             continue
-        key = m.group(1).lower()
-        val = _strip_wrapped_quotes(m.group(2))
-        fields[key] = val
+        if current_key:
+            current_lines.append(raw_line)
+    _flush()
 
     if {"file", "replace", "with"} <= set(fields.keys()):
         count_raw = fields.get("count", "1").strip().lower()
@@ -511,8 +730,16 @@ def _is_heavy_opencode_prompt(prompt: str) -> tuple[bool, str]:
     char_count = len(text)
     line_count = text.count("\n") + 1
 
-    max_chars = _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_CHARS", 900, min_value=200)
-    max_lines = _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_LINES", 28, min_value=5)
+    max_chars = _env_int(
+        "OUROBOROS_CODEX_DIRECT_HEAVY_CHARS",
+        _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_CHARS", 900, min_value=200),
+        min_value=200,
+    )
+    max_lines = _env_int(
+        "OUROBOROS_CODEX_DIRECT_HEAVY_LINES",
+        _env_int("OUROBOROS_OPENCODE_DIRECT_HEAVY_LINES", 28, min_value=5),
+        min_value=5,
+    )
 
     if char_count > max_chars:
         return True, f"chars>{max_chars}"
@@ -542,7 +769,7 @@ def _is_heavy_opencode_prompt(prompt: str) -> tuple[bool, str]:
     return False, ""
 
 
-def _offload_opencode_to_worker(
+def _offload_patch_edit_to_worker(
     ctx: ToolContext,
     prompt: str,
     cwd: str,
@@ -550,18 +777,18 @@ def _offload_opencode_to_worker(
 ) -> str:
     task_id = uuid.uuid4().hex[:8]
     prompt_preview = truncate_for_log(prompt.replace("\n", " "), 140)
-    description = f"Выполни правку кода через opencode_edit: {prompt_preview}"
+    description = f"Выполни правку кода через patch_edit: {prompt_preview}"
     parent_task_id = str(getattr(ctx, "task_id", "") or "").strip()
     context_lines = [
         "Авто-маршрутизация тяжёлой правки из direct chat в worker.",
         f"Причина: {reason}",
         f"CWD hint: {cwd or '.'}",
-        "Сделай 1 вызов opencode_edit с исходным prompt ниже.",
+        "Сделай 1 вызов patch_edit с исходным prompt ниже.",
         "После правки проверь изменения и дай краткий отчёт на русском.",
         "",
-        "[BEGIN_OPENCODE_PROMPT]",
+        "[BEGIN_PATCH_EDIT_PROMPT]",
         prompt,
-        "[END_OPENCODE_PROMPT]",
+        "[END_PATCH_EDIT_PROMPT]",
     ]
 
     evt: Dict[str, Any] = {
@@ -580,7 +807,7 @@ def _offload_opencode_to_worker(
             ctx.drive_logs() / "events.jsonl",
             {
                 "ts": utc_now_iso(),
-                "type": "opencode_offloaded_to_worker",
+                "type": "patch_edit_offloaded_to_worker",
                 "task_id": parent_task_id,
                 "scheduled_task_id": task_id,
                 "reason": reason,
@@ -588,10 +815,10 @@ def _offload_opencode_to_worker(
             },
         )
     except Exception:
-        log.debug("Failed to log opencode offload event", exc_info=True)
+        log.debug("Failed to log patch_edit offload event", exc_info=True)
 
     return (
-        f"↪️ HEAVY_OPENCODE_OFFLOADED: scheduled task {task_id}. "
+        f"↪️ HEAVY_PATCH_EDIT_OFFLOADED: scheduled task {task_id}. "
         "Use wait_for_task with this id to track completion."
     )
 
@@ -618,8 +845,6 @@ def _apply_fast_edit(ctx: ToolContext, work_dir: str, plan: Dict[str, Any]) -> D
     count = int(plan.get("count") or 1)
     if not old:
         return {"ok": False, "error": "REPLACE text is empty"}
-    if "\n" in old or "\n" in new:
-        return {"ok": False, "error": "fast edit supports only single-line replace"}
 
     original = target.read_text(encoding="utf-8")
     occurrences = original.count(old)
@@ -671,7 +896,7 @@ def _apply_fast_edit(ctx: ToolContext, work_dir: str, plan: Dict[str, Any]) -> D
     }
 
 
-def _check_uncommitted_changes(repo_dir: pathlib.Path, source: str = "OpenCode") -> str:
+def _check_uncommitted_changes(repo_dir: pathlib.Path, source: str = "Codex CLI") -> str:
     """Check git status after edit, return warning string or empty string."""
     try:
         status_res = subprocess.run(
@@ -696,12 +921,25 @@ def _check_uncommitted_changes(repo_dir: pathlib.Path, source: str = "OpenCode")
                     f"Remember to run git_status and repo_commit_push!"
                 )
     except Exception as e:
-        log.debug("Failed to check git status after opencode_edit: %s", e, exc_info=True)
+        log.debug("Failed to check git status after code edit: %s", e, exc_info=True)
     return ""
 
 
+def _patch_edit_format_message(error: str = "") -> str:
+    base = (
+        "⚠️ PATCH_EDIT_FORMAT: use one structured self-edit prompt in the form:\n"
+        "FILE: path/to/file\n"
+        "REPLACE: old text\n"
+        "WITH: new text\n"
+        "COUNT: 1"
+    )
+    if error:
+        return f"{base}\nReason: {error}"
+    return base
+
+
 def _parse_opencode_output(stdout: str) -> str:
-    """Parse OpenCode output (JSON or JSONL) and extract a readable text result."""
+    """Parse code-edit CLI output (JSON or JSONL) and extract a readable text result."""
     text = (stdout or "").strip()
     if not text:
         return ""
@@ -715,6 +953,9 @@ def _parse_opencode_output(stdout: str) -> str:
                     out.append(val.strip())
             if "delta" in obj and isinstance(obj["delta"], str) and obj["delta"].strip():
                 out.append(obj["delta"].strip())
+            for val in obj.values():
+                if isinstance(val, (dict, list)):
+                    out.extend(_extract_text_from_obj(val))
         elif isinstance(obj, list):
             for item in obj:
                 out.extend(_extract_text_from_obj(item))
@@ -747,24 +988,61 @@ def _parse_opencode_output(stdout: str) -> str:
 
 
 def _emit_opencode_usage_if_available(ctx: ToolContext, stdout: str) -> None:
-    """Emit llm_usage event when OpenCode returns numeric cost in JSON payload."""
-    try:
-        payload = json.loads((stdout or "").strip())
-    except Exception:
-        return
-    if not isinstance(payload, dict):
+    """Emit llm_usage event when code-edit CLI returns usage in JSON payload."""
+    text = (stdout or "").strip()
+    if not text:
         return
 
-    cost = payload.get("total_cost_usd")
-    if not isinstance(cost, (int, float)):
-        cost = payload.get("cost")
-    if not isinstance(cost, (int, float)):
+    usage_payload: Dict[str, Any] | None = None
+    cost: float | None = None
+
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            maybe_cost = payload.get("total_cost_usd")
+            if not isinstance(maybe_cost, (int, float)):
+                maybe_cost = payload.get("cost")
+            if isinstance(maybe_cost, (int, float)):
+                cost = float(maybe_cost)
+            maybe_usage = payload.get("usage")
+            if isinstance(maybe_usage, dict):
+                usage_payload = maybe_usage
+    except Exception:
+        pass
+
+    if usage_payload is None:
+        for line in text.splitlines():
+            ln = line.strip()
+            if not ln:
+                continue
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            maybe_usage = obj.get("usage")
+            if isinstance(maybe_usage, dict):
+                usage_payload = maybe_usage
+            maybe_cost = obj.get("total_cost_usd")
+            if not isinstance(maybe_cost, (int, float)):
+                maybe_cost = obj.get("cost")
+            if isinstance(maybe_cost, (int, float)):
+                cost = float(maybe_cost)
+
+    if cost is None and not usage_payload:
         return
+
+    usage_event: Dict[str, Any] = {}
+    if usage_payload:
+        usage_event.update(usage_payload)
+    if cost is not None:
+        usage_event["cost"] = float(cost)
 
     ctx.pending_events.append({
         "type": "llm_usage",
-        "provider": "opencode_cli",
-        "usage": {"cost": float(cost)},
+        "provider": "codex_cli",
+        "usage": usage_event,
         "source": "opencode_edit",
         "ts": utc_now_iso(),
         "category": "task",
@@ -795,8 +1073,8 @@ def _run_pytest(repo_dir: pathlib.Path) -> str:
         return ""
 
 
-def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Edit code via adaptive route: fast local patch first, optional OpenCode CLI only when enabled."""
+def _patch_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
+    """Edit code via local structured self-edit patches only."""
     started = time.monotonic()
 
     def _finish(
@@ -836,7 +1114,7 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
     if not isinstance(prompt, str) or not prompt.strip():
         return _finish(
-            "⚠️ OPENCODE_ARG_ERROR: prompt must be a non-empty string.",
+            "⚠️ CODE_EDIT_ARG_ERROR: prompt must be a non-empty string.",
             ok=False,
             route="reject",
             fallback_used=False,
@@ -858,14 +1136,14 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             failure_reason="prompt_too_large",
         )
 
-    if (not _self_edit_only_enabled()) and getattr(ctx, "is_direct_chat", False) and _env_bool(
-        "OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT",
-        default=True,
+    if getattr(ctx, "is_direct_chat", False) and _env_bool(
+        "OUROBOROS_CODEX_OFFLOAD_HEAVY_DIRECT_CHAT",
+        default=_env_bool("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", default=True),
     ):
         is_heavy, heavy_reason = _is_heavy_opencode_prompt(prompt)
         if is_heavy:
             return _finish(
-                _offload_opencode_to_worker(
+                _offload_patch_edit_to_worker(
                     ctx=ctx,
                     prompt=prompt,
                     cwd=cwd,
@@ -879,16 +1157,25 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
                 budget_exhausted=False,
                 fast_edit_reason=heavy_reason,
             )
-    from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
+    from ouroboros.tools.git import _acquire_git_lock, _ensure_git_repo_ready, _release_git_lock
 
-    work_dir = str(ctx.repo_dir)
-    if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
-        if candidate.exists():
-            work_dir = str(candidate)
+    session_state = _load_codex_task_session(ctx)
+    work_dir = _choose_opencode_work_dir(ctx, cwd=cwd, session_state=session_state)
 
     lock = _acquire_git_lock(ctx)
     try:
+        ok, repo_note = _ensure_git_repo_ready(ctx, action="patch_edit", auto_recover=True)
+        if not ok:
+            return _finish(
+                repo_note,
+                ok=False,
+                route="reject",
+                fallback_used=False,
+                attempts_total=0,
+                models_tried=[],
+                budget_exhausted=False,
+                failure_reason="git_repo_unhealthy",
+            )
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
@@ -904,228 +1191,63 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             )
 
         fast_plan = _parse_fast_edit_prompt(prompt)
-        route = "opencode"
-        fallback_used = False
         fast_edit_reason = str(fast_plan.get("reason") or "") if fast_plan else ""
-        if fast_plan:
-            ctx.emit_progress_fn("Applying fast local edit...")
-            fast = _apply_fast_edit(ctx, work_dir=work_dir, plan=fast_plan)
-            if fast.get("ok"):
-                out = (
-                    "✅ FAST_EDIT_APPLIED: "
-                    f"{fast.get('file')} "
-                    f"(replacements={int(fast.get('replacements_applied') or 0)}, method={fast.get('method')})"
-                )
-                warning = _check_uncommitted_changes(ctx.repo_dir, source="fast-path")
-                if warning:
-                    out += warning
-                out += _run_pytest(ctx.repo_dir)
-                return _finish(
-                    out,
-                    ok=True,
-                    route="fast_path",
-                    fallback_used=False,
-                    attempts_total=0,
-                    models_tried=[],
-                    budget_exhausted=False,
-                    fast_edit_reason=fast_edit_reason,
-                    fast_edit_method=str(fast.get("method") or ""),
-                    fast_edit_file=str(fast.get("file") or ""),
-                    fast_edit_replacements=int(fast.get("replacements_applied") or 0),
-                )
-            if _self_edit_only_enabled():
-                return _finish(
-                    "⚠️ SELF_EDIT_ONLY: external OpenCode fallback is disabled. "
-                    "Use a structured self-edit prompt in the form:\n"
-                    "FILE: path/to/file\nREPLACE: old text\nWITH: new text\nCOUNT: 1",
-                    ok=False,
-                    route="self_edit_only",
-                    fallback_used=False,
-                    attempts_total=0,
-                    models_tried=[],
-                    budget_exhausted=False,
-                    failure_reason="self_edit_only_fast_path_failed",
-                    fast_edit_reason=fast_edit_reason,
-                )
-            route = "fallback_to_opencode"
-            fallback_used = True
-            ctx.emit_progress_fn("Fast local edit failed, delegating to OpenCode CLI...")
-        else:
-            if _self_edit_only_enabled():
-                return _finish(
-                    "⚠️ SELF_EDIT_ONLY: OpenCode CLI is disabled by OUROBOROS_SELF_EDIT_ONLY=1. "
-                    "Use a structured self-edit prompt in the form:\n"
-                    "FILE: path/to/file\nREPLACE: old text\nWITH: new text\nCOUNT: 1",
-                    ok=False,
-                    route="self_edit_only",
-                    fallback_used=False,
-                    attempts_total=0,
-                    models_tried=[],
-                    budget_exhausted=False,
-                    failure_reason="self_edit_only_requires_structured_prompt",
-                )
-            ctx.emit_progress_fn("Delegating to OpenCode CLI...")
-
-        full_prompt = (
-            f"STRICT: Only modify files inside {work_dir}. "
-            f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
-            f"{prompt}"
-        )
-
-        env = os.environ.copy()
-        local_bin = str(pathlib.Path.home() / ".local" / "bin")
-        opencode_home_bin = str(pathlib.Path.home() / ".opencode" / "bin")
-        env["PATH"] = _prepend_path_entries(
-            env.get("PATH", ""),
-            [local_bin, opencode_home_bin, "/usr/local/bin"],
-        )
-        opencode_ready, opencode_info = _ensure_opencode_cli(ctx, work_dir=work_dir, env=env)
-        if not opencode_ready:
+        if not fast_plan:
             return _finish(
-                f"⚠️ OPENCODE_BOOTSTRAP_FAILED: {opencode_info}",
+                _patch_edit_format_message(),
                 ok=False,
-                route=route,
-                fallback_used=fallback_used,
+                route="invalid_prompt",
+                fallback_used=False,
                 attempts_total=0,
                 models_tried=[],
                 budget_exhausted=False,
-                failure_reason="opencode_bootstrap_failed",
-                fast_edit_reason=fast_edit_reason,
+                failure_reason="invalid_prompt",
             )
-        _append_tool_event(ctx, {"ok": True, "stage": "resolved", "path": opencode_info})
 
-        max_retries = max(1, int(os.environ.get("OUROBOROS_OPENCODE_MAX_RETRIES", "1") or "1"))
-        # Keep this below tool timeout_sec (300) to guarantee lock release in finally.
-        total_budget_sec = max(60, int(os.environ.get("OUROBOROS_OPENCODE_TOTAL_BUDGET_SEC", "260") or "260"))
-        per_attempt_timeout_sec = max(20, int(os.environ.get("OUROBOROS_OPENCODE_ATTEMPT_TIMEOUT_SEC", "90") or "90"))
-        deadline = time.monotonic() + total_budget_sec
-        model_attempts: List[str] = [""] + _opencode_fallback_models()
-        res = None
-        stdout = ""
-        stderr = ""
-        failed = True
-        attempt_notes: List[str] = []
-        budget_exhausted = False
-        attempts_total = 0
-        models_tried: List[str] = []
-
-        for model in model_attempts:
-            model_label = model or "default"
-            for attempt in range(1, max_retries + 1):
-                remaining = int(deadline - time.monotonic())
-                if remaining <= 15:
-                    budget_exhausted = True
-                    attempt_notes.append(f"{model_label}#{attempt}:budget_exhausted")
-                    break
-                effective_timeout = min(per_attempt_timeout_sec, max(15, remaining - 5))
-                attempts_total += 1
-                if model_label not in models_tried:
-                    models_tried.append(model_label)
-                if model:
-                    ctx.emit_progress_fn(
-                        f"OpenCode retry with {model_label} (attempt {attempt}/{max_retries})..."
-                    )
-                try:
-                    cur_res = _run_opencode_cli(
-                        work_dir=work_dir,
-                        prompt=full_prompt,
-                        env=env,
-                        model=model,
-                        timeout_sec=effective_timeout,
-                    )
-                    cur_stdout = (cur_res.stdout or "").strip()
-                    cur_stderr = (cur_res.stderr or "").strip()
-                    cur_failed = (
-                        cur_res.returncode != 0
-                        or _opencode_has_error_payload(cur_stdout)
-                    )
-                    if not cur_failed:
-                        res = cur_res
-                        stdout = cur_stdout
-                        stderr = cur_stderr
-                        failed = False
-                        break
-
-                    if _opencode_no_changes_detected(cur_stdout, cur_stderr):
-                        return "ℹ️ OpenCode: no changes to apply (target state already reached)."
-
-                    reason = "copilot_auth" if _is_copilot_reauth_error(cur_stdout, cur_stderr) else "tool_or_provider_error"
-                    attempt_notes.append(
-                        f"{model_label}#{attempt}:{reason}:exit={cur_res.returncode}:t={effective_timeout}s"
-                    )
-                    stdout = cur_stdout
-                    stderr = cur_stderr
-                    res = cur_res
-                except subprocess.TimeoutExpired as te:
-                    timeout_stdout = (te.stdout or "").strip() if isinstance(te.stdout, str) else ""
-                    timeout_stderr = (te.stderr or "").strip() if isinstance(te.stderr, str) else ""
-                    if _opencode_no_changes_detected(timeout_stdout, timeout_stderr):
-                        return "ℹ️ OpenCode: no changes to apply (target state already reached)."
-                    attempt_notes.append(f"{model_label}#{attempt}:timeout:{effective_timeout}s")
-                    stdout = timeout_stdout
-                    stderr = timeout_stderr
-                    res = subprocess.CompletedProcess(
-                        args=[],
-                        returncode=124,
-                        stdout=timeout_stdout,
-                        stderr=timeout_stderr,
-                    )
-                except Exception as e:
-                    attempt_notes.append(f"{model_label}#{attempt}:{type(e).__name__}")
-                    stdout = ""
-                    stderr = str(e)
-                    res = subprocess.CompletedProcess(
-                        args=[],
-                        returncode=125,
-                        stdout="",
-                        stderr=str(e),
-                    )
-
-            if not failed:
-                break
-            if budget_exhausted:
-                break
-
-        if failed:
-            budget_note = ""
-            if budget_exhausted:
-                budget_note = (
-                    f"\nBudget limit reached: OUROBOROS_OPENCODE_TOTAL_BUDGET_SEC={total_budget_sec}, "
-                    f"OUROBOROS_OPENCODE_ATTEMPT_TIMEOUT_SEC={per_attempt_timeout_sec}."
-                )
-            help_text = (
-                "\n\nTroubleshooting:\n"
-                "1) Ensure /app/opencode.json exists with provider 'opencode' and free model defaults.\n"
-                "2) Verify key is present in container: OPENCODE_API_KEY.\n"
-                "3) Test manually: opencode run -m opencode/minimax-m2.5-free \"Reply with exactly: OK\" --format json\n"
-            )
-            attempts_text = ", ".join(attempt_notes[-10:]) if attempt_notes else "n/a"
+        ctx.emit_progress_fn("Applying local patch edit...")
+        fast = _apply_fast_edit(ctx, work_dir=work_dir, plan=fast_plan)
+        if not fast.get("ok"):
             return _finish(
-                f"⚠️ OPENCODE_ERROR: exit={res.returncode if res is not None else 'n/a'}\n"
-                f"Attempts: {attempts_text}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-                f"{budget_note}{help_text}",
+                _patch_edit_format_message(str(fast.get("error") or "patch apply failed")),
                 ok=False,
-                route=route,
-                fallback_used=fallback_used,
-                attempts_total=attempts_total,
-                models_tried=models_tried,
-                budget_exhausted=budget_exhausted,
-                failure_reason="opencode_failed",
+                route="patch_failed",
+                fallback_used=False,
+                attempts_total=0,
+                models_tried=[],
+                budget_exhausted=False,
+                failure_reason="patch_failed",
                 fast_edit_reason=fast_edit_reason,
             )
-        if not stdout:
-            stdout = "OK: OpenCode completed with empty output."
 
-        warning = _check_uncommitted_changes(ctx.repo_dir, source="OpenCode")
+        out = (
+            "✅ PATCH_EDIT_APPLIED: "
+            f"{fast.get('file')} "
+            f"(replacements={int(fast.get('replacements_applied') or 0)}, method={fast.get('method')})"
+        )
+        if repo_note:
+            out = f"{repo_note}\n{out}"
+        warning = _check_uncommitted_changes(ctx.repo_dir, source="patch_edit")
         if warning:
-            stdout += warning
-        _emit_opencode_usage_if_available(ctx, stdout)
-
+            out += warning
+        out += _run_pytest(ctx.repo_dir)
+        return _finish(
+            out,
+            ok=True,
+            route="fast_path",
+            fallback_used=False,
+            attempts_total=0,
+            models_tried=[],
+            budget_exhausted=False,
+            fast_edit_reason=fast_edit_reason,
+            fast_edit_method=str(fast.get("method") or ""),
+            fast_edit_file=str(fast.get("file") or ""),
+            fast_edit_replacements=int(fast.get("replacements_applied") or 0),
+        )
     except Exception as e:
         return _finish(
-            f"⚠️ OPENCODE_FAILED: {type(e).__name__}: {e}",
+            f"⚠️ PATCH_EDIT_FAILED: {type(e).__name__}: {e}",
             ok=False,
-            route="opencode",
+            route="patch_edit",
             fallback_used=False,
             attempts_total=0,
             models_tried=[],
@@ -1135,17 +1257,30 @@ def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     finally:
         _release_git_lock(lock)
 
-    result = _parse_opencode_output(stdout)
-    result += _run_pytest(ctx.repo_dir)
-    return _finish(
-        result,
-        ok=True,
-        route=route,
-        fallback_used=fallback_used,
-        attempts_total=attempts_total,
-        models_tried=models_tried,
-        budget_exhausted=budget_exhausted,
-        fast_edit_reason=fast_edit_reason,
+def _opencode_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
+    """Deprecated stub: external OpenCode path is disabled."""
+    _append_tool_stats(
+        ctx,
+        {
+            "ok": False,
+            "route": "disabled",
+            "fallback_used": False,
+            "attempts_total": 0,
+            "retries_used": 0,
+            "models_tried": [],
+            "budget_exhausted": False,
+            "failure_reason": "tool_disabled",
+            "fast_edit_reason": "",
+            "fast_edit_method": "",
+            "fast_edit_file": "",
+            "fast_edit_replacements": 0,
+            "duration_ms": 0,
+        },
+        tool_name="opencode_edit",
+    )
+    return (
+        "⚠️ OPENCODE_EDIT_DISABLED: tool opencode_edit is disabled. "
+        "Use patch_edit for code changes."
     )
 
 
@@ -1159,16 +1294,17 @@ def get_tools() -> List[ToolEntry]:
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_run_shell_timeout_sec()),
-        ToolEntry("opencode_edit", {
-            "name": "opencode_edit",
+        ToolEntry("patch_edit", {
+            "name": "patch_edit",
             "description": (
-                "Edit code. Applies internal self-edit fast path first; "
-                "when OUROBOROS_SELF_EDIT_ONLY is disabled it may fall back to OpenCode CLI. "
+                "Edit code via local structured self-edit patches only. "
+                "Use one atomic FILE/REPLACE/WITH/COUNT change per call. "
+                "If git state is unhealthy, run git_repo_health(auto_recover=true) first. "
                 "Follow with repo_commit_push."
             ),
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
                 "cwd": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
-        }, _opencode_edit, is_code_tool=True, timeout_sec=300),
+        }, _patch_edit, is_code_tool=True, timeout_sec=300),
     ]

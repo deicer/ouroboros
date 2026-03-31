@@ -1,7 +1,11 @@
 import os
+import types
 
 from ouroboros.llm import (
     build_reasoning_config,
+    build_prompt_cache_key,
+    build_response_session_id,
+    fetch_openrouter_pricing,
     get_llm_api_key,
     get_llm_base_url,
     get_fallback_models_from_env,
@@ -167,3 +171,296 @@ def test_llm_client_defaults_to_env_overrides(monkeypatch):
 
     assert client._base_url == "http://127.0.0.1:2455/v1"
     assert client._api_key == "sk-clb-test"
+
+
+def test_fetch_openrouter_pricing_sends_auth_header(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_BASE_URL", "http://31.56.196.40:3455/v1")
+    monkeypatch.setenv("OUROBOROS_LLM_API_KEY", "sk-clb-test")
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": []}
+
+    def fake_get(url, timeout=0, headers=None):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        captured["headers"] = headers or {}
+        return DummyResponse()
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    assert fetch_openrouter_pricing() == {}
+    assert captured["url"] == "http://31.56.196.40:3455/v1/models"
+    assert captured["timeout"] == 15
+    assert captured["headers"]["Authorization"] == "Bearer sk-clb-test"
+
+
+def test_build_prompt_cache_key_is_stable_for_same_scope():
+    key1 = build_prompt_cache_key(
+        scope="task_loop",
+        model="gpt-5.4",
+        task_id="task-1",
+        session_id="sess-1",
+        tool_names=["repo_read", "run_shell"],
+    )
+    key2 = build_prompt_cache_key(
+        scope="task_loop",
+        model="gpt-5.4",
+        task_id="task-1",
+        session_id="sess-1",
+        tool_names=["repo_read", "run_shell"],
+    )
+    key3 = build_prompt_cache_key(
+        scope="task_loop",
+        model="gpt-5.4",
+        task_id="task-1",
+        session_id="sess-1",
+        tool_names=["repo_read", "patch_edit"],
+    )
+
+    assert key1 == key2
+    assert key1 != key3
+
+
+def test_build_response_session_id_is_stable_per_scope_and_subject():
+    sid1 = build_response_session_id(scope="task_loop", runtime_session_id="runtime-1", task_id="task-1")
+    sid2 = build_response_session_id(scope="task_loop", runtime_session_id="runtime-1", task_id="task-1")
+    sid3 = build_response_session_id(scope="task_loop", runtime_session_id="runtime-1", task_id="task-2")
+    sid4 = build_response_session_id(scope="consciousness", runtime_session_id="runtime-1")
+
+    assert sid1 == sid2
+    assert sid1 != sid3
+    assert sid1 != sid4
+
+
+def test_llm_chat_sets_prompt_cache_hints_for_gpt_5_4(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("OUROBOROS_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL_PAID_LIST", "gpt-5.4")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK_LIST", "gpt-5.4")
+
+    class DummyResponse:
+        def model_dump(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 1,
+                    "total_tokens": 11,
+                    "input_tokens_details": {"cached_tokens": 3},
+                },
+            }
+
+    class DummyResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return DummyResponse()
+
+    dummy_client = types.SimpleNamespace(responses=DummyResponses())
+
+    client = LLMClient(api_key="sk-test", base_url="http://127.0.0.1:2455/v1")
+    monkeypatch.setattr(client, "_get_client", lambda: dummy_client)
+
+    msg, usage = client.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        model="gpt-5.4",
+        prompt_cache_key="ouroboros:test-key",
+    )
+
+    assert msg["content"] == "ok"
+    assert usage["prompt_tokens"] == 10
+    assert usage["cached_tokens"] == 3
+    assert captured["prompt_cache_key"] == "ouroboros:test-key"
+    assert captured["prompt_cache_retention"] in {"in_memory", "in-memory"}
+
+
+def test_llm_chat_keeps_prompt_cache_key_without_24h_for_non_gpt_5_4(monkeypatch):
+    captured = {}
+    monkeypatch.setenv("OUROBOROS_MODEL", "gpt-5.3-codex")
+    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "gpt-5.3-codex")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "gpt-5.3-codex")
+    monkeypatch.setenv("OUROBOROS_MODEL_PAID_LIST", "gpt-5.3-codex")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK_LIST", "gpt-5.3-codex")
+
+    class DummyResponse:
+        def model_dump(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 8,
+                    "output_tokens": 1,
+                    "total_tokens": 9,
+                    "input_tokens_details": {"cached_tokens": 0},
+                },
+            }
+
+    class DummyResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return DummyResponse()
+
+    dummy_client = types.SimpleNamespace(responses=DummyResponses())
+
+    client = LLMClient(api_key="sk-test", base_url="http://127.0.0.1:2455/v1")
+    monkeypatch.setattr(client, "_get_client", lambda: dummy_client)
+
+    client.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        model="gpt-5.3-codex",
+        prompt_cache_key="ouroboros:test-key",
+    )
+
+    assert captured["prompt_cache_key"] == "ouroboros:test-key"
+    assert "prompt_cache_retention" not in captured
+
+
+def test_llm_chat_uses_session_id_for_header_and_default_prompt_cache_key(monkeypatch):
+    captured = {}
+
+    class DummyResponse:
+        def model_dump(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 1,
+                    "total_tokens": 13,
+                    "input_tokens_details": {"cached_tokens": 4},
+                },
+            }
+
+    class DummyResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return DummyResponse()
+
+    dummy_client = types.SimpleNamespace(responses=DummyResponses())
+
+    client = LLMClient(api_key="sk-test", base_url="http://127.0.0.1:2455/v1")
+    monkeypatch.setattr(client, "_get_client", lambda: dummy_client)
+
+    client.chat(
+        messages=[{"role": "user", "content": "hello"}],
+        model="gpt-5.4",
+        session_id="sess-task-1",
+    )
+
+    assert captured["prompt_cache_key"] == "sess-task-1"
+    assert captured["extra_headers"]["session_id"] == "sess-task-1"
+
+
+def test_llm_chat_maps_responses_function_calls_and_history(monkeypatch):
+    captured = {}
+
+    class DummyResponse:
+        def model_dump(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "checking file"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "repo_read",
+                        "arguments": "{\"path\":\"README.md\"}",
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 21,
+                    "output_tokens": 7,
+                    "total_tokens": 28,
+                    "input_tokens_details": {"cached_tokens": 5},
+                },
+            }
+
+    class DummyResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return DummyResponse()
+
+    dummy_client = types.SimpleNamespace(responses=DummyResponses())
+    client = LLMClient(api_key="sk-test", base_url="http://127.0.0.1:2455/v1")
+    monkeypatch.setattr(client, "_get_client", lambda: dummy_client)
+
+    msg, usage = client.chat(
+        messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "read file"},
+            {
+                "role": "assistant",
+                "content": "checking file",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "repo_read", "arguments": "{\"path\":\"README.md\"}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "README body"},
+        ],
+        model="gpt-5.4",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "repo_read",
+                    "description": "Read file",
+                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+                },
+            }
+        ],
+        prompt_cache_key="ouroboros:test-key",
+    )
+
+    assert msg["content"] == "checking file"
+    assert msg["tool_calls"] == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "repo_read", "arguments": "{\"path\":\"README.md\"}"},
+        }
+    ]
+    assert usage["prompt_tokens"] == 21
+    assert usage["completion_tokens"] == 7
+    assert usage["cached_tokens"] == 5
+
+    tool = captured["tools"][0]
+    assert tool["type"] == "function"
+    assert tool["name"] == "repo_read"
+    assert tool["description"] == "Read file"
+
+    assert captured["instructions"] == "sys"
+    assert captured["input"][0]["role"] == "user"
+    assert captured["input"][1]["role"] == "assistant"
+    assert captured["input"][2]["type"] == "function_call"
+    assert captured["input"][3]["type"] == "function_call_output"

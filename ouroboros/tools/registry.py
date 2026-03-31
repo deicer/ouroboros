@@ -82,8 +82,8 @@ class ToolEntry:
 CORE_TOOL_NAMES = {
     "repo_read", "repo_list", "repo_commit_push",
     "drive_read", "drive_list", "drive_write",
-    "run_shell", "opencode_edit",
-    "git_status", "git_diff",
+    "run_shell", "patch_edit",
+    "git_status", "git_repo_health", "git_diff",
     "schedule_task", "wait_for_task", "get_task_result",
     "update_scratchpad", "update_identity", "update_user_context",
     "chat_history", "web_search",
@@ -104,6 +104,7 @@ class ToolRegistry:
     def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
         self._entries: Dict[str, ToolEntry] = {}
         self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+        self._queued_extra_tools: List[str] = []
         self._load_modules()
 
     def _load_modules(self) -> None:
@@ -174,6 +175,29 @@ class ToolRegistry:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
             return f"⚠️ TOOL_ERROR ({name}): {e}"
+
+    def queue_tools_for_next_task(self, names: List[str]) -> List[str]:
+        queued: List[str] = []
+        existing = set(self._queued_extra_tools)
+        for name in names:
+            tool_name = str(name or "").strip()
+            if not tool_name or tool_name in existing:
+                continue
+            if tool_name in self._entries:
+                self._queued_extra_tools.append(tool_name)
+                existing.add(tool_name)
+                queued.append(tool_name)
+        return queued
+
+    def consume_queued_tools_for_task(self) -> List[Dict[str, Any]]:
+        names = list(self._queued_extra_tools)
+        self._queued_extra_tools = []
+        schemas: List[Dict[str, Any]] = []
+        for name in names:
+            schema = self.get_schema_by_name(name)
+            if schema:
+                schemas.append(schema)
+        return schemas
 
     def override_handler(self, name: str, handler) -> None:
         """Override the handler for a registered tool (used for closure injection)."""

@@ -285,6 +285,7 @@ def _call_llm_with_retry(
     event_queue: Optional[Any],
     accumulated_usage: Dict[str, Any],
     task_type: str = "",
+    prompt_cache_key: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """
     Call LLM with retry logic, usage tracking, and event emission.
@@ -297,7 +298,12 @@ def _call_llm_with_retry(
 
     for attempt in range(max_retries):
         try:
-            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
+            kwargs = {
+                "messages": messages,
+                "model": model,
+                "reasoning_effort": effort,
+                "prompt_cache_key": prompt_cache_key,
+            }
             if tools:
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)

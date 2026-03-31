@@ -16,6 +16,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.bootstrap_env import should_notify_long_running_tasks_to_owner_from_env
 from supervisor.state import (
     QUEUE_SNAPSHOT_PATH,
     append_jsonl,
@@ -279,7 +280,7 @@ def enforce_task_timeouts() -> None:
 
         if runtime_sec >= SOFT_TIMEOUT_SEC and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
-            if owner_chat_id:
+            if owner_chat_id and should_notify_long_running_tasks_to_owner_from_env():
                 send_with_budget(
                     owner_chat_id,
                     f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "

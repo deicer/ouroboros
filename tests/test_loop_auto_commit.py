@@ -31,7 +31,7 @@ def _exec_result(tool: str, result: str = "OK") -> dict:
     }
 
 
-def test_process_tool_results_auto_commit_after_opencode(monkeypatch, tmp_path: pathlib.Path):
+def test_process_tool_results_auto_commit_after_patch_edit(monkeypatch, tmp_path: pathlib.Path):
     monkeypatch.setenv("OUROBOROS_AUTO_COMMIT_AFTER_EDIT", "1")
     logs = tmp_path / "logs"
     tools = _FakeTools(
@@ -42,7 +42,7 @@ def test_process_tool_results_auto_commit_after_opencode(monkeypatch, tmp_path: 
     llm_trace = {"tool_calls": []}
 
     error_count = _process_tool_results(
-        results=[_exec_result("opencode_edit", result="Updated file")],
+        results=[_exec_result("patch_edit", result="Updated file")],
         messages=messages,
         llm_trace=llm_trace,
         emit_progress=lambda _m: None,
@@ -69,7 +69,7 @@ def test_process_tool_results_auto_commit_skips_when_clean(monkeypatch, tmp_path
     llm_trace = {"tool_calls": []}
 
     error_count = _process_tool_results(
-        results=[_exec_result("opencode_edit", result="No change")],
+        results=[_exec_result("patch_edit", result="No change")],
         messages=messages,
         llm_trace=llm_trace,
         emit_progress=lambda _m: None,
@@ -99,7 +99,7 @@ def test_process_tool_results_auto_commit_error_increments_error_count(
     llm_trace = {"tool_calls": []}
 
     error_count = _process_tool_results(
-        results=[_exec_result("opencode_edit", result="Applied edits")],
+        results=[_exec_result("patch_edit", result="Applied edits")],
         messages=messages,
         llm_trace=llm_trace,
         emit_progress=lambda _m: None,

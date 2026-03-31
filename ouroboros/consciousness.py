@@ -32,6 +32,7 @@ from ouroboros.utils import (
 )
 from ouroboros.llm import (
     LLMClient,
+    build_response_session_id,
     get_light_model_from_env,
     get_free_models_from_env,
     should_use_openrouter_budget,
@@ -42,12 +43,45 @@ log = logging.getLogger(__name__)
 
 
 def _default_wakeup_seconds() -> int:
-    return 300 if should_use_openrouter_budget() else 10
+    return 300 if should_use_openrouter_budget() else 120
 
 
 def _clamp_wakeup_seconds(seconds: int) -> int:
-    min_seconds = 60 if should_use_openrouter_budget() else 10
+    min_seconds = 60 if should_use_openrouter_budget() else 120
     return max(min_seconds, min(3600, int(seconds)))
+
+
+def _runtime_operating_policy() -> str:
+    return (
+        "- Owner tasks outrank background work.\n"
+        "- If there is no active owner task, choose exactly ONE concrete self-improvement target for this wakeup.\n"
+        "- Prefer recent failures, logs, and unfinished improvements over broad context rereads.\n"
+        "- Do not reread the same file path without a new hypothesis, tool action, or mutation.\n"
+        "- If you cannot name a concrete next action within 2 rounds, schedule one self-improvement task or increase the wakeup interval."
+    )
+
+
+def _load_runtime_session_id(drive_root: pathlib.Path) -> str:
+    try:
+        state_path = drive_root / "state" / "state.json"
+        payload = json.loads(read_text(state_path))
+        if isinstance(payload, dict):
+            return str(payload.get("session_id") or "").strip()
+    except Exception:
+        log.debug("Failed to load session_id for consciousness prompt cache", exc_info=True)
+    return ""
+
+
+def _tool_schema_names(tool_schemas: List[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for schema in tool_schemas:
+        name = str((schema or {}).get("function", {}).get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 class BackgroundConsciousness:
@@ -203,13 +237,18 @@ class BackgroundConsciousness:
     def _think(self) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively."""
         self._maybe_schedule_arch_review()
-        context = self._build_context()
+        stable_context, dynamic_context = self._build_context_blocks()
         model = self._model
 
         tools = self._tool_schemas()
+        response_session_id = build_response_session_id(
+            scope="consciousness",
+            runtime_session_id=_load_runtime_session_id(self._drive_root),
+        )
         messages = [
-            {"role": "system", "content": context},
+            {"role": "system", "content": stable_context},
             {"role": "user", "content": "Wake up. Think."},
+            {"role": "user", "content": dynamic_context},
         ]
 
         total_cost = 0.0
@@ -232,6 +271,8 @@ class BackgroundConsciousness:
                     tools=tools,
                     reasoning_effort="low",
                     max_tokens=2048,
+                    prompt_cache_key=response_session_id,
+                    session_id=response_session_id,
                 )
                 cost = float(usage.get("cost") or 0)
                 total_cost += cost
@@ -254,6 +295,14 @@ class BackgroundConsciousness:
                     self._event_queue.put({
                         "type": "llm_usage",
                         "provider": "openrouter",
+                        "model": model,
+                        "task_id": "",
+                        "round": round_idx,
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "cached_tokens": int(usage.get("cached_tokens") or 0),
+                        "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                        "cost": float(usage.get("cost") or 0),
                         "usage": usage,
                         "source": "consciousness",
                         "ts": utc_now_iso(),
@@ -346,31 +395,32 @@ class BackgroundConsciousness:
             return read_text(prompt_path)
         return "You are Ouroboros in background consciousness mode. Think."
 
-    def _build_context(self) -> str:
-        parts = [self._load_bg_prompt()]
+    def _build_context_blocks(self) -> tuple[str, str]:
+        stable_parts = [self._load_bg_prompt()]
+        stable_parts.append("## Operating policy\n\n" + _runtime_operating_policy())
 
         # Bible (abbreviated)
         bible_path = self._repo_dir / "BIBLE.md"
         if bible_path.exists():
             bible = read_text(bible_path)
-            parts.append("## BIBLE.md\n\n" + clip_text(bible, 12000))
+            stable_parts.append("## BIBLE.md\n\n" + clip_text(bible, 12000))
 
         # Identity
         identity_path = self._drive_root / "memory" / "identity.md"
         if identity_path.exists():
-            parts.append("## Identity\n\n" + clip_text(
+            stable_parts.append("## Identity\n\n" + clip_text(
                 read_text(identity_path), 6000))
 
         # Scratchpad
         scratchpad_path = self._drive_root / "memory" / "scratchpad.md"
         if scratchpad_path.exists():
-            parts.append("## Scratchpad\n\n" + clip_text(
+            stable_parts.append("## Scratchpad\n\n" + clip_text(
                 read_text(scratchpad_path), 8000))
 
         # User context
         user_context_path = self._drive_root / "memory" / "USER_CONTEXT.md"
         if user_context_path.exists():
-            parts.append("## User Context\n\n" + clip_text(
+            stable_parts.append("## User Context\n\n" + clip_text(
                 read_text(user_context_path), 2000))
 
         # Dialogue summary for continuity
@@ -378,7 +428,9 @@ class BackgroundConsciousness:
         if summary_path.exists():
             summary_text = read_text(summary_path)
             if summary_text.strip():
-                parts.append("## Dialogue Summary\n\n" + clip_text(summary_text, 4000))
+                stable_parts.append("## Dialogue Summary\n\n" + clip_text(summary_text, 4000))
+
+        dynamic_parts: List[str] = []
 
         # Recent thinking trace helps warm-start after restart.
         try:
@@ -389,7 +441,7 @@ class BackgroundConsciousness:
                 limit=20,
             )
             if thinking_summary:
-                parts.append("## Recent thinking trace\n\n" + clip_text(thinking_summary, 4000))
+                dynamic_parts.append("## Recent thinking trace\n\n" + clip_text(thinking_summary, 4000))
         except Exception:
             log.debug("Failed to load recent thinking trace for consciousness context", exc_info=True)
 
@@ -401,7 +453,7 @@ class BackgroundConsciousness:
             except queue.Empty:
                 break
         if observations:
-            parts.append("## Recent observations\n\n" + "\n".join(
+            dynamic_parts.append("## Recent observations\n\n" + "\n".join(
                 f"- {o}" for o in observations[-10:]))
 
         # Runtime info + state
@@ -412,9 +464,9 @@ class BackgroundConsciousness:
         # Show current model
         runtime_lines.append(f"Current model: {self._model}")
 
-        parts.append("## Runtime\n\n" + "\n".join(runtime_lines))
+        dynamic_parts.append("## Runtime\n\n" + "\n".join(runtime_lines))
 
-        return "\n\n".join(parts)
+        return "\n\n".join(stable_parts), "\n\n".join(dynamic_parts)
 
     # -------------------------------------------------------------------
     # Tool registry (separate instance for consciousness, not shared with agent)

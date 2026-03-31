@@ -45,15 +45,26 @@ def _enable_tools(ctx: ToolContext, tools: str = "", **kwargs) -> str:
         return "No tools specified."
     found = []
     not_found = []
+    queue_fn = getattr(_registry, "queue_tools_for_next_task", None)
+    queued_names: List[str] = []
     for name in names:
         schema = _registry.get_schema_by_name(name)
         if schema:
             found.append(f"{name}: {schema['function'].get('description', '')[:100]}")
+            if callable(queue_fn):
+                queued_result = queue_fn([name])
+                queued_names.extend([name] if queued_result is None else queued_result)
         else:
             not_found.append(name)
     parts = []
     if found:
-        parts.append("✅ Tools are registered and callable:\n" + "\n".join(f"  - {s}" for s in found))
+        if queued_names:
+            parts.append(
+                "✅ Tools queued for the next task (current task toolset stays fixed for cache stability):\n"
+                + "\n".join(f"  - {s}" for s in found)
+            )
+        else:
+            parts.append("✅ Tools are registered and callable:\n" + "\n".join(f"  - {s}" for s in found))
     if not_found:
         parts.append(f"❌ Not found: {', '.join(not_found)}")
     return "\n".join(parts)
@@ -84,8 +95,9 @@ def get_tools() -> List[ToolEntry]:
                 "name": "enable_tools",
                 "description": (
                     "Enable specific additional tools by name (comma-separated). "
-                    "Their schemas will be added to your active tool set for the "
-                    "remainder of this task. Example: enable_tools(tools='multi_model_review,generate_evolution_stats')"
+                    "Their schemas will be queued for the next task so the current "
+                    "task keeps a stable tool set for prompt caching. "
+                    "Example: enable_tools(tools='multi_model_review,generate_evolution_stats')"
                 ),
                 "parameters": {
                     "type": "object",

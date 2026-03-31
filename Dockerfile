@@ -5,11 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl gnupg tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 LTS (required for OpenCode CLI)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -25,11 +20,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Playwright browser (for browse_page/browser_action tools)
 RUN playwright install --with-deps chromium
-
-# OpenCode CLI (required — sole code editing path)
-RUN curl -fsSL https://opencode.ai/install | bash \
-    && ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode \
-    && opencode --version
 
 # Create ouroboros OS user (bypassPermissions is blocked for root)
 RUN useradd -m -s /bin/bash ouroboros

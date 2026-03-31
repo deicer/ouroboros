@@ -189,6 +189,15 @@ _AUTO_RESUME_TEXT = (
 )
 
 
+_IDLE_SELF_IMPROVEMENT_TEXT = (
+    "[idle self-improvement after restart] No active owner task is currently pending. "
+    "Enter self-improvement mode. Choose exactly ONE concrete self-improvement action that would make you more reliable for the next owner task. "
+    "Do not resume stale scratchpad context by default. Use recent logs, recent thinking trace, scratchpad, and code to identify the highest-value improvement. "
+    "If you do not have a concrete action within 2 rounds, schedule one self-improvement task or set a longer wakeup. "
+    "Answer the owner only if you produced a real result or found a concrete blocker."
+)
+
+
 def _auto_resume_signature(chat_id: int, text: str) -> str:
     raw = f"{int(chat_id)}|{str(text).strip()}".encode("utf-8", errors="ignore")
     return hashlib.sha256(raw).hexdigest()
@@ -228,7 +237,42 @@ def _should_skip_auto_resume(
 def _mark_auto_resume(st: Dict[str, Any], signature: str, now_iso: str) -> None:
     st["auto_resume_last"] = {"signature": str(signature), "ts": str(now_iso)}
 
-def auto_resume_after_restart() -> None:
+
+def _choose_restart_bootstrap_mode(
+    st: Dict[str, Any],
+    now_iso: str,
+    has_pending_restart_verify: bool,
+) -> str:
+    if has_pending_restart_verify:
+        return "resume_owner_work"
+    raw_last_owner = str(st.get("last_owner_message_at") or "").strip()
+    if not raw_last_owner:
+        return "idle_self_improvement"
+    try:
+        window_sec = max(300, int(str(os.environ.get("OUROBOROS_AUTO_RESUME_OWNER_WINDOW_SEC", "1800")).strip()))
+    except (TypeError, ValueError):
+        window_sec = 1800
+    try:
+        now_dt = datetime.datetime.fromisoformat(now_iso)
+        last_owner_dt = datetime.datetime.fromisoformat(raw_last_owner)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=datetime.timezone.utc)
+        if last_owner_dt.tzinfo is None:
+            last_owner_dt = last_owner_dt.replace(tzinfo=datetime.timezone.utc)
+        owner_age_sec = max(0.0, (now_dt - last_owner_dt).total_seconds())
+        if owner_age_sec <= float(window_sec):
+            return "resume_owner_work"
+    except Exception:
+        log.debug("Failed to parse last_owner_message_at for restart bootstrap mode", exc_info=True)
+    return "idle_self_improvement"
+
+
+def _restart_bootstrap_text(mode: str) -> str:
+    if mode == "resume_owner_work":
+        return _AUTO_RESUME_TEXT
+    return _IDLE_SELF_IMPROVEMENT_TEXT
+
+def auto_resume_after_restart(bg_consciousness: Optional[Any] = None) -> Optional[str]:
     """If recent restart left open work, auto-resume without waiting for owner message.
 
     Checks: scratchpad content, recent restart events, pending_restart_verify.
@@ -274,11 +318,37 @@ def auto_resume_after_restart() -> None:
                     log.debug("Suppressed exception", exc_info=True)
 
         if not recent_restart:
-            return
+            return None
 
-        signature = _auto_resume_signature(int(chat_id), _AUTO_RESUME_TEXT)
+        # Check if scratchpad has meaningful content
+        scratchpad_path = DRIVE_ROOT / "memory" / "scratchpad.md"
+        if not scratchpad_path.exists():
+            return None
+
+        scratchpad = scratchpad_path.read_text(encoding="utf-8")
+        # Skip if scratchpad is empty or default
+        stripped = scratchpad.strip()
+        if not stripped or stripped == "# Scratchpad" or "(empty" in stripped.lower():
+            # Check if it's just the default template with all empty sections
+            content_lines = [
+                ln.strip() for ln in stripped.splitlines()
+                if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
+            ]
+            # Filter out UpdatedAt lines
+            content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
+            if not content_lines:
+                return None
+
+        mode = _choose_restart_bootstrap_mode(
+            st,
+            now_iso=now_iso,
+            has_pending_restart_verify=restart_verify_path.exists(),
+        )
+        text = _restart_bootstrap_text(mode)
+        signature = _auto_resume_signature(int(chat_id), text)
         if (
-            not force_report_after_restart
+            mode == "resume_owner_work"
+            and not force_report_after_restart
             and _should_skip_auto_resume(
                 st,
                 signature=signature,
@@ -296,26 +366,20 @@ def auto_resume_after_restart() -> None:
                     "dedup_sec": dedup_sec,
                 },
             )
-            return
+            return mode
 
-        # Check if scratchpad has meaningful content
-        scratchpad_path = DRIVE_ROOT / "memory" / "scratchpad.md"
-        if not scratchpad_path.exists():
-            return
-
-        scratchpad = scratchpad_path.read_text(encoding="utf-8")
-        # Skip if scratchpad is empty or default
-        stripped = scratchpad.strip()
-        if not stripped or stripped == "# Scratchpad" or "(empty" in stripped.lower():
-            # Check if it's just the default template with all empty sections
-            content_lines = [
-                ln.strip() for ln in stripped.splitlines()
-                if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
-            ]
-            # Filter out UpdatedAt lines
-            content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
-            if not content_lines:
-                return
+        if mode == "idle_self_improvement":
+            if bg_consciousness is not None and hasattr(bg_consciousness, "inject_observation"):
+                bg_consciousness.inject_observation(text)
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": now_iso,
+                    "type": "auto_resume_deferred_to_consciousness",
+                    "mode": mode,
+                },
+            )
+            return mode
 
         # Auto-resume: inject synthetic message
         time.sleep(2)  # Let everything initialize
@@ -327,7 +391,7 @@ def auto_resume_after_restart() -> None:
             threading.Thread(
                 target=handle_chat_direct,
                 args=(int(chat_id),
-                      _AUTO_RESUME_TEXT,
+                      text,
                       None),
                 daemon=True,
             ).start()
@@ -337,14 +401,17 @@ def auto_resume_after_restart() -> None:
                     "ts": now_iso,
                     "type": "auto_resume_triggered",
                     "signature": signature[:12],
+                    "mode": mode,
                 },
             )
+        return mode
     except Exception as e:
         append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "type": "auto_resume_error",
             "error": repr(e),
         })
+        return None
 
 
 # ---------------------------------------------------------------------------

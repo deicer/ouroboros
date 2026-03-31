@@ -20,6 +20,7 @@ from ouroboros.apply_patch import install as install_apply_patch
 from ouroboros.bootstrap_env import (
     should_autostart_background_from_env,
     should_use_openrouter_budget_from_env,
+    should_bootstrap_git_reset_from_env,
 )
 install_apply_patch()
 
@@ -228,8 +229,14 @@ from supervisor.events import dispatch_event
 # 5) Bootstrap repo
 # ----------------------------
 ensure_repo_present()
-ok, msg = safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
-assert ok, f"Bootstrap failed: {msg}"
+if should_bootstrap_git_reset_from_env():
+    ok, msg = safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
+    assert ok, f"Bootstrap failed: {msg}"
+else:
+    deps_ok, deps_msg = sync_runtime_dependencies(reason="bootstrap_no_reset")
+    assert deps_ok, f"Bootstrap deps failed: {deps_msg}"
+    t = import_test()
+    assert t["ok"], f"Bootstrap import failed without reset: {t}"
 
 # ----------------------------
 # 5.1) First-run initialization (Bible section 18)
@@ -350,7 +357,8 @@ except Exception as e:
 # ----------------------------
 # 6.2) Auto-resume after restart
 # ----------------------------
-auto_resume_after_restart()
+# Startup bootstrap is handled after background consciousness starts so stale
+# restart context can be routed into idle self-improvement instead of direct chat.
 
 # ----------------------------
 # 6.3) Direct-mode watchdog
@@ -644,6 +652,11 @@ try:
         log.info("\U0001f9e0 Background consciousness auto-start disabled by OUROBOROS_BG_ENABLED")
 except Exception as e:
     log.warning("consciousness auto-start failed: %s", e)
+
+try:
+    auto_resume_after_restart(_consciousness)
+except Exception as e:
+    log.warning("restart bootstrap failed: %s", e)
 
 while True:
     loop_started_ts = time.time()

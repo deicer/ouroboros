@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from ouroboros.bootstrap_env import should_deliver_progress_to_owner_from_env
 from supervisor.state import append_jsonl, load_state, save_state
 
 log = logging.getLogger(__name__)
@@ -594,6 +595,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             "direction": "out", "chat_id": chat_id, "user_id": owner_id,
             "text": log_payload,
         })
+        if not should_deliver_progress_to_owner_from_env():
+            return
     else:
         log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
     budget = budget_line(force=force_budget)

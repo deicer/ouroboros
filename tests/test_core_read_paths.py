@@ -1,8 +1,9 @@
 import pathlib
 import tempfile
 
-from ouroboros.tools.core import _drive_read, _drive_write, _repo_read
+from ouroboros.tools.core import _drive_read, _drive_write, _repo_read, _summarize_dialogue
 from ouroboros.tools.registry import ToolContext
+from ouroboros.llm import build_response_session_id
 
 
 def _mk_ctx(repo_dir: pathlib.Path, drive_root: pathlib.Path) -> ToolContext:
@@ -149,3 +150,43 @@ def test_repo_read_identity_redirects_to_drive_memory_file():
         ctx = _mk_ctx(repo, drive)
         out = _repo_read(ctx, "identity.md")
         assert out == "identity-from-drive"
+
+
+def test_summarize_dialogue_uses_prompt_cache_key_and_logs_model(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir(parents=True, exist_ok=True)
+    (drive / "logs").mkdir(parents=True, exist_ok=True)
+    (drive / "memory").mkdir(parents=True, exist_ok=True)
+    (drive / "state").mkdir(parents=True, exist_ok=True)
+    (drive / "logs" / "chat.jsonl").write_text(
+        '{"ts":"2026-03-15T00:00:00Z","direction":"in","text":"hello"}\n',
+        encoding="utf-8",
+    )
+    (drive / "state" / "state.json").write_text('{"session_id":"sess-sum"}', encoding="utf-8")
+
+    captured = {}
+
+    class DummyLLM:
+        def chat(self, **kwargs):
+            captured.update(kwargs)
+            return {"content": "Summary body"}, {"prompt_tokens": 200, "completion_tokens": 40, "cached_tokens": 80, "cost": 0.02}
+
+    monkeypatch.setattr("ouroboros.llm.LLMClient", lambda: DummyLLM())
+    monkeypatch.setattr("ouroboros.llm.get_light_model_from_env", lambda: "gpt-5.4")
+
+    ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="task-sum")
+    out = _summarize_dialogue(ctx, last_n=10)
+
+    expected_key = build_response_session_id(
+        scope="summarize_dialogue",
+        runtime_session_id="sess-sum",
+        task_id="task-sum",
+    )
+    assert "Summary body" in out
+    assert captured["prompt_cache_key"] == expected_key
+    assert captured["session_id"] == expected_key
+    usage_evt = ctx.pending_events[-1]
+    assert usage_evt["model"] == "gpt-5.4"
+    assert usage_evt["prompt_tokens"] == 200
+    assert usage_evt["cached_tokens"] == 80

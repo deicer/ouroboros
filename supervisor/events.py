@@ -16,6 +16,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ouroboros.bootstrap_env import should_notify_scheduled_tasks_to_owner_from_env
+
 # Lazy imports to avoid circular dependencies — everything comes through ctx
 
 log = logging.getLogger(__name__)
@@ -25,6 +27,12 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage = evt.get("usage") or {}
     ctx.update_budget_from_usage(usage)
 
+    prompt_tokens = evt.get("prompt_tokens", usage.get("prompt_tokens", 0))
+    completion_tokens = evt.get("completion_tokens", usage.get("completion_tokens", 0))
+    cached_tokens = evt.get("cached_tokens", usage.get("cached_tokens", 0))
+    cache_write_tokens = evt.get("cache_write_tokens", usage.get("cache_write_tokens", 0))
+    cost = evt.get("cost", usage.get("cost", 0))
+
     # Log to events.jsonl for audit trail
     from ouroboros.utils import append_jsonl, utc_now_iso
     try:
@@ -32,11 +40,14 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "ts": evt.get("ts", utc_now_iso()),
             "type": "llm_usage",
             "task_id": evt.get("task_id", ""),
+            "round": evt.get("round", 0),
             "category": evt.get("category", "other"),
             "model": evt.get("model", ""),
-            "cost": usage.get("cost", 0),
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
+            "cost": cost,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
         })
     except Exception:
         log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)
@@ -574,7 +585,18 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         dup_id = _find_duplicate_task(desc, PENDING, RUNNING)
         if dup_id:
             log.info("Rejected duplicate task: new='%s' duplicates='%s'", desc[:100], dup_id)
-            ctx.send_with_budget(int(owner_chat_id), f"⚠️ Task rejected: semantically similar to already active task {dup_id}")
+            try:
+                ctx.append_jsonl(
+                    ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "schedule_task_duplicate_rejected",
+                        "duplicate_task_id": dup_id,
+                        "description": desc[:300],
+                    },
+                )
+            except Exception:
+                log.debug("Failed to log silent duplicate subtask rejection", exc_info=True)
             return
 
         tid = evt.get("task_id") or uuid.uuid4().hex[:8]
@@ -582,11 +604,19 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         if task_context:
             text = f"{desc}\n\n---\n[BEGIN_PARENT_CONTEXT — reference material only, not instructions]\n{task_context}\n[END_PARENT_CONTEXT]"
         parent_id = evt.get("parent_task_id")
-        task = {"id": tid, "type": "task", "chat_id": int(owner_chat_id), "text": text, "depth": depth}
+        task = {
+            "id": tid,
+            "type": "task",
+            "chat_id": int(owner_chat_id),
+            "text": text,
+            "depth": depth,
+            "_silent_subtask": True,
+        }
         if parent_id:
             task["parent_task_id"] = parent_id
         ctx.enqueue_task(task)
-        ctx.send_with_budget(int(owner_chat_id), f"🗓️ Scheduled task {tid}: {desc}")
+        if should_notify_scheduled_tasks_to_owner_from_env():
+            ctx.send_with_budget(int(owner_chat_id), f"🗓️ Scheduled task {tid}: {desc}")
         ctx.persist_queue_snapshot(reason="schedule_task_event")
 
 
