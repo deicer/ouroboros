@@ -306,6 +306,10 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.3.0 -- Whisper Model Upgrade
+- **Whisper model**: переключился с `tiny` на `base` для лучшего качества распознавания голосовых сообщений.
+- Замедление ~20%, но точность заметно выше, особенно для русского языка.
+
 ### v7.2.0 -- Голосовые сообщения в Telegram
 - Добавлен метод `transcribe_voice()` в `supervisor/telegram.py` — транскрипция через faster-whisper
 - Голосовые сообщения обрабатываются в polling loop и batch mode
