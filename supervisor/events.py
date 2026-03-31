@@ -8,7 +8,7 @@ Extracted from launcher main loop to keep it under 500 lines.
 from __future__ import annotations
 
 import datetime
-import json
+import io\nimport json
 import logging
 import os
 import sys
@@ -725,11 +725,43 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
-EVENT_HANDLERS = {
+EVENT_
+def _handle_send_voice(evt: Dict[str, Any], ctx: Any) -> None:
+    """Send voice message (OGG Opus) with optional text fallback."""
+    try:
+        ogg_bytes = evt.get('ogg_bytes') or evt.get('voice_bytes')
+        if ogg_bytes:
+            result = ctx.b.send_audio(
+                chat_id=int(evt['chat_id']),
+                audio=('voice.ogg', io.BytesIO(ogg_bytes), 'audio/ogg'),
+                caption=str(evt.get('caption', '')) or None,
+                disable_notification=bool(evt.get('quiet', False)),
+            )
+            ctx._last_message_id = result.message_id
+        else:
+            ctx.send_with_budget(
+                int(evt['chat_id']),
+                str(evt.get('text', '')),
+                fmt=str(evt.get('format') or ''),
+                is_progress=bool(evt.get('is_progress')),
+            )
+    except Exception:
+        try:
+            ctx.send_with_budget(
+                int(evt['chat_id']),
+                str(evt.get('fallback_text', '???')),
+                fmt='md',
+                is_progress=bool(evt.get('is_progress')),
+            )
+        except Exception:
+            pass
+
+HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
+    "send_voice": _handle_send_voice,
     "task_done": _handle_task_done,
     "task_metrics": _handle_task_metrics,
     "review_request": _handle_review_request,
