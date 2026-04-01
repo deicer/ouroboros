@@ -205,7 +205,6 @@ class ToolRegistry:
             return "TOOL_ARG_ERROR (" + name + "): " + str(e)
         except Exception as e:
             return "TOOL_ERROR (" + name + "): " + str(e)
-            return f"⚠️ TOOL_ERROR ({name}): {e}"
 
     def queue_tools_for_next_task(self, names: List[str]) -> List[str]:
         queued: List[str] = []
