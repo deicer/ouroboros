@@ -73,21 +73,27 @@ async def tts_list_voices(ctx: ToolContext, **kwargs) -> str:
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
-            name="send_voice_message",
-            description="Generate voice message from text using edge-tts and send via Telegram",
-            parameters={
-                "text": "Text to convert to speech",
-                "voice": "Voice name (default: ru-RU-DmitryNeural)",
-                "reply_to_msg_id": "Optional: message ID to reply to",
+            "send_voice_message",
+            {
+                "name": "send_voice_message",
+                "description": "Generate voice message from text using edge-tts and send via Telegram",
+                "parameters": {"type": "object", "properties": {
+                    "text": {"type": "string", "description": "Text to convert to speech"},
+                    "voice": {"type": "string", "description": "Voice name (default: ru-RU-DmitryNeural)"},
+                    "reply_to_msg_id": {"type": "string", "description": "Optional: message ID to reply to"},
+                }, "required": ["text"]},
             },
-            async_function=send_voice_message,
+            send_voice_message,
         ),
         ToolEntry(
-            name="tts_list_voices",
-            description="List available TTS voices for a language (default: ru)",
-            parameters={
-                "lang": "Language code (default: ru)",
+            "tts_list_voices",
+            {
+                "name": "tts_list_voices",
+                "description": "List available TTS voices for a language (default: ru)",
+                "parameters": {"type": "object", "properties": {
+                    "lang": {"type": "string", "description": "Language code (default: ru)"},
+                }},
             },
-            async_function=tts_list_voices,
+            tts_list_voices,
         ),
     ]
