@@ -308,8 +308,6 @@ def _call_llm_with_retry(
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
-            from ouroboros.llm import add_usage
-            add_usage(accumulated_usage, usage)
 
             # Calculate cost and emit event for EVERY attempt (including retries)
             cost = float(usage.get("cost") or 0)
@@ -322,6 +320,10 @@ def _call_llm_with_retry(
                     int(usage.get("cached_tokens") or 0),
                     int(usage.get("cache_write_tokens") or 0),
                 )
+                usage["cost"] = cost
+
+            from ouroboros.llm import add_usage
+            add_usage(accumulated_usage, usage)
 
             # Emit real-time usage event with category based on task_type
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"

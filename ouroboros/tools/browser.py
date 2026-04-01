@@ -32,6 +32,7 @@ _playwright_ready = False
 # Persists across ToolContext recreations but can be reset on error
 _pw_instance = None
 _pw_thread_id = None  # Track which thread owns the Playwright instance
+_browser_lock = threading.Lock()
 
 
 def _ensure_playwright_installed():
@@ -98,7 +99,11 @@ def _reset_playwright_greenlet():
 
 def _ensure_browser(ctx: ToolContext):
     """Create or reuse browser for this task. Browser state lives in ctx,
-    but Playwright instance is module-level to avoid greenlet issues."""
+    but Playwright instance is module-level to avoid greenlet issues.
+
+    Only one browser may be active at a time to avoid Chromium OOM in the
+    constrained container.
+    """
     global _pw_instance, _pw_thread_id
 
     # Check if we've switched threads - if so, reset everything
@@ -116,6 +121,10 @@ def _ensure_browser(ctx: ToolContext):
             pass
         # Browser died — clean up and recreate
         cleanup_browser(ctx)
+
+    if not getattr(ctx.browser_state, "_holds_browser_lock", False):
+        _browser_lock.acquire()
+        ctx.browser_state._holds_browser_lock = True
 
     _ensure_playwright_installed()
 
@@ -195,6 +204,12 @@ def cleanup_browser(ctx: ToolContext) -> None:
     ctx.browser_state.page = None
     ctx.browser_state.browser = None
     ctx.browser_state.pw_instance = None
+    if getattr(ctx.browser_state, "_holds_browser_lock", False):
+        ctx.browser_state._holds_browser_lock = False
+        try:
+            _browser_lock.release()
+        except RuntimeError:
+            pass
 
 
 _MARKDOWN_JS = """() => {

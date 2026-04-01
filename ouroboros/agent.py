@@ -616,7 +616,6 @@ class OuroborosAgent:
             # Emit events for supervisor
             self._emit_task_results(task, text, usage, llm_trace, start_time, drive_logs)
             return list(self._pending_events)
-
         finally:
             self._busy = False
             # Clean up browser if it was used during this task
@@ -626,15 +625,9 @@ class OuroborosAgent:
             except Exception:
                 log.debug("Failed to cleanup browser", exc_info=True)
                 pass
-            while not self._incoming_messages.empty():
-                try:
-                    self._incoming_messages.get_nowait()
-                except queue.Empty:
-                    break
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None
-
     # =====================================================================
     # Task result emission
     # =====================================================================

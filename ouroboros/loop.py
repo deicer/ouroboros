@@ -1244,10 +1244,10 @@ def run_llm_loop(
         repeated_batch_window_min = 10
         log.warning("Invalid OUROBOROS_REPEAT_TOOL_BATCH_WINDOW_MIN, defaulting to 10")
     try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
+        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "50")))
     except (ValueError, TypeError):
-        MAX_ROUNDS = 200
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+        MAX_ROUNDS = 50
+        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 50")
     direct_chat_max_rounds = max(20, _env_int("OUROBOROS_DIRECT_CHAT_MAX_ROUNDS", 80))
     effective_max_rounds = min(MAX_ROUNDS, direct_chat_max_rounds) if is_direct_chat else MAX_ROUNDS
     owner_interrupt_grace_rounds = max(1, _env_int("OUROBOROS_OWNER_INTERRUPT_GRACE_ROUNDS", 3))
@@ -1531,7 +1531,6 @@ def run_llm_loop(
             })
 
             if content and content.strip():
-                emit_progress(content.strip())
                 llm_trace["assistant_notes"].append(content.strip()[:320])
 
             error_count = _handle_tool_calls(
@@ -1886,7 +1885,6 @@ def _call_llm_with_retry(
                 kwargs["tools"] = tools
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
-            add_usage(accumulated_usage, usage)
 
             # Calculate cost and emit event for EVERY attempt (including retries)
             cost = float(usage.get("cost") or 0)
@@ -1898,6 +1896,9 @@ def _call_llm_with_retry(
                     int(usage.get("cached_tokens") or 0),
                     int(usage.get("cache_write_tokens") or 0),
                 )
+                usage["cost"] = cost
+
+            add_usage(accumulated_usage, usage)
 
             # Emit real-time usage event with category based on task_type
             category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
