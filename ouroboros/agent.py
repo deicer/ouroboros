@@ -829,6 +829,12 @@ class OuroborosAgent:
                 "format": "markdown",
                 "task_id": task.get("id"), "ts": utc_now_iso(),
             })
+            # TTS: send voice reply in parallel with text
+            self._pending_events.append({
+                "type": "send_voice", "chat_id": task["chat_id"],
+                "text": user_text or "\u200b",
+                "task_id": task.get("id"), "ts": utc_now_iso(),
+            })
 
         duration_sec = round(time.time() - start_time, 3)
         n_tool_calls = len(llm_trace.get("tool_calls", []))
