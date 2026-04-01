@@ -77,6 +77,7 @@ class ToolEntry:
     schema: Dict[str, Any]
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
+    is_async: bool = False
     timeout_sec: int = 120
 
 
