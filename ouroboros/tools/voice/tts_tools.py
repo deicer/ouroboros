@@ -84,6 +84,7 @@ def get_tools() -> List[ToolEntry]:
                 }, "required": ["text"]},
             },
             send_voice_message,
+            is_async=True,
         ),
         ToolEntry(
             "tts_list_voices",
@@ -95,5 +96,6 @@ def get_tools() -> List[ToolEntry]:
                 }},
             },
             tts_list_voices,
+            is_async=True,
         ),
     ]
