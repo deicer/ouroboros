@@ -1136,27 +1136,6 @@ def _patch_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
             failure_reason="prompt_too_large",
         )
 
-    if getattr(ctx, "is_direct_chat", False) and _env_bool(
-        "OUROBOROS_CODEX_OFFLOAD_HEAVY_DIRECT_CHAT",
-        default=_env_bool("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", default=True),
-    ):
-        is_heavy, heavy_reason = _is_heavy_opencode_prompt(prompt)
-        if is_heavy:
-            return _finish(
-                _offload_patch_edit_to_worker(
-                    ctx=ctx,
-                    prompt=prompt,
-                    cwd=cwd,
-                    reason=heavy_reason,
-                ),
-                ok=True,
-                route="offload_to_worker",
-                fallback_used=False,
-                attempts_total=0,
-                models_tried=[],
-                budget_exhausted=False,
-                fast_edit_reason=heavy_reason,
-            )
     from ouroboros.tools.git import _acquire_git_lock, _ensure_git_repo_ready, _release_git_lock
 
     session_state = _load_codex_task_session(ctx)
@@ -1192,6 +1171,31 @@ def _patch_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
         fast_plan = _parse_fast_edit_prompt(prompt)
         fast_edit_reason = str(fast_plan.get("reason") or "") if fast_plan else ""
+        if (
+            not fast_plan
+            and getattr(ctx, "is_direct_chat", False)
+            and _env_bool(
+                "OUROBOROS_CODEX_OFFLOAD_HEAVY_DIRECT_CHAT",
+                default=_env_bool("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", default=False),
+            )
+        ):
+            is_heavy, heavy_reason = _is_heavy_opencode_prompt(prompt)
+            if is_heavy:
+                return _finish(
+                    _offload_patch_edit_to_worker(
+                        ctx=ctx,
+                        prompt=prompt,
+                        cwd=cwd,
+                        reason=heavy_reason,
+                    ),
+                    ok=True,
+                    route="offload_to_worker",
+                    fallback_used=False,
+                    attempts_total=0,
+                    models_tried=[],
+                    budget_exhausted=False,
+                    fast_edit_reason=heavy_reason,
+                )
         if not fast_plan:
             return _finish(
                 _patch_edit_format_message(),

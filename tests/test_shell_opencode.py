@@ -240,6 +240,7 @@ def test_patch_edit_large_prompt_fast_fails(tmp_path, monkeypatch):
 
 
 def test_patch_edit_offloads_heavy_direct_chat_to_worker(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.shell import _patch_edit
 
@@ -249,6 +250,9 @@ def test_patch_edit_offloads_heavy_direct_chat_to_worker(tmp_path, monkeypatch):
     drive_root.mkdir()
 
     monkeypatch.setenv("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", "1")
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
     ctx = ToolContext(
         repo_dir=repo_dir,
         drive_root=drive_root,
@@ -269,6 +273,89 @@ def test_patch_edit_offloads_heavy_direct_chat_to_worker(tmp_path, monkeypatch):
     last = stats[-1]
     assert last["tool"] == "patch_edit"
     assert last["route"] == "offload_to_worker"
+    assert last["ok"] is True
+
+
+def test_patch_edit_heavy_direct_chat_stays_local_by_default(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _patch_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+
+    monkeypatch.delenv("OUROBOROS_CODEX_OFFLOAD_HEAVY_DIRECT_CHAT", raising=False)
+    monkeypatch.delenv("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", raising=False)
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+
+    ctx = ToolContext(
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        is_direct_chat=True,
+        task_id="parent-1",
+    )
+
+    result = _patch_edit(ctx, "Refactor the entire project architecture and split modules by responsibility.")
+
+    assert "HEAVY_PATCH_EDIT_OFFLOADED" not in result
+    assert "PATCH_EDIT_FORMAT" in result
+    assert not any(e.get("type") == "schedule_task" for e in ctx.pending_events)
+
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["tool"] == "patch_edit"
+    assert last["route"] == "invalid_prompt"
+    assert last["ok"] is False
+
+
+def test_patch_edit_structured_prompt_skips_offload_even_when_enabled(tmp_path, monkeypatch):
+    from ouroboros.tools import git as git_tools
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.shell import _patch_edit
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    target = repo_dir / "sample.txt"
+    target.write_text("hello world\n", encoding="utf-8")
+
+    monkeypatch.setenv("OUROBOROS_OPENCODE_OFFLOAD_HEAVY_DIRECT_CHAT", "1")
+    monkeypatch.setattr(git_tools, "_acquire_git_lock", lambda ctx: object())
+    monkeypatch.setattr(git_tools, "_release_git_lock", lambda lock: None)
+    monkeypatch.setattr("ouroboros.tools.shell.run_cmd", lambda *a, **k: "")
+    monkeypatch.setattr("ouroboros.tools.shell._run_pytest", lambda repo: "")
+
+    ctx = ToolContext(
+        repo_dir=repo_dir,
+        drive_root=drive_root,
+        is_direct_chat=True,
+        task_id="parent-1",
+    )
+    prompt = (
+        "FILE: sample.txt\n"
+        "REPLACE: hello\n"
+        "WITH: hi # refactor\n"
+        "COUNT: 1\n"
+    )
+
+    result = _patch_edit(ctx, prompt)
+
+    assert "PATCH_EDIT_APPLIED" in result
+    assert "HEAVY_PATCH_EDIT_OFFLOADED" not in result
+    assert target.read_text(encoding="utf-8") == "hi # refactor world\n"
+    assert not any(e.get("type") == "schedule_task" for e in ctx.pending_events)
+
+    stats = _read_jsonl(drive_root / "logs" / "tools_stats.jsonl")
+    assert stats
+    last = stats[-1]
+    assert last["tool"] == "patch_edit"
+    assert last["route"] == "fast_path"
     assert last["ok"] is True
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from supervisor.telegram import _progress_dedup_decision
+from supervisor.telegram import _progress_dedup_decision, _sanitize_owner_facing_text
 
 
 def test_progress_dedup_suppresses_same_text_within_window():
@@ -47,3 +47,33 @@ def test_progress_dedup_allows_different_text():
         window_sec=60,
     )
     assert suppress is False
+
+
+def test_sanitize_owner_facing_text_removes_raw_tool_leakage():
+    raw = (
+        "Сейчас добираю точку отправки.\n"
+        "to=functions.run_shell {\"cmd\":[\"bash\",\"-lc\",\"python ...\"]}\n"
+        "{\"cmd\":[\"bash\",\"-lc\",\"python ...\"]}\n"
+        "Сразу после этого внесу патч.\n"
+    )
+
+    cleaned = _sanitize_owner_facing_text(raw)
+
+    assert "to=functions.run_shell" not in cleaned
+    assert "{\"cmd\"" not in cleaned
+    assert "Сейчас добираю точку отправки." in cleaned
+    assert "Сразу после этого внесу патч." in cleaned
+
+
+def test_sanitize_owner_facing_text_collapses_duplicate_lines():
+    raw = (
+        "Смотрю конец send_with_budget и место, где сейчас реально уходит Telegram API.\n"
+        "Смотрю конец send_with_budget и место, где сейчас реально уходит Telegram API.\n"
+        "Смотрю конец send_with_budget и место, где сейчас реально уходит Telegram API.\n"
+        "Потом внесу правку.\n"
+    )
+
+    cleaned = _sanitize_owner_facing_text(raw)
+
+    assert cleaned.count("Смотрю конец send_with_budget") == 1
+    assert "Потом внесу правку." in cleaned

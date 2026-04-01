@@ -169,7 +169,7 @@ docker compose exec -T -e OPENAI_API_KEY="$OUROBOROS_LLM_API_KEY" ouroboros \
   "Reply with exactly: OK"
 ```
 
-`patch_edit` is now the only public code-editing tool. It applies local structured self-edit patches and never falls back to OpenCode/Codex CLI. `opencode_edit` remains disabled internally for compatibility only and is not exposed to the model.
+`patch_edit` is now the only public code-editing tool. It applies local structured self-edit patches and never falls back to OpenCode/Codex CLI. In direct chat, heavy unstructured edit prompts stay local by default and return format guidance instead of auto-offloading to workers. `opencode_edit` remains disabled internally for compatibility only and is not exposed to the model.
 
 ---
 

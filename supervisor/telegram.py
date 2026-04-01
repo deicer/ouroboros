@@ -698,6 +698,59 @@ def _progress_dedup_decision(
     return False, st, 0
 
 
+_RAW_TOOL_LINE_PATTERNS = (
+    re.compile(r"^\s*to=functions\.[\w_]+", re.IGNORECASE),
+    re.compile(r"^\s*to=multi_tool_use\.[\w_]+", re.IGNORECASE),
+    re.compile(r"^\s*\{.*\"cmd\"\s*:\s*\[", re.IGNORECASE),
+    re.compile(r"^\s*\{.*\"recipient_name\"\s*:\s*\"functions\.", re.IGNORECASE),
+)
+
+
+def _sanitize_owner_facing_text(text: str) -> str:
+    """Strip raw tool-call leakage and collapse noisy repeated lines."""
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return ""
+
+    cleaned_lines: List[str] = []
+    last_norm = ""
+    repeat_count = 0
+    removed_tool_noise = False
+
+    for line in raw.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            if cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+            continue
+
+        if any(p.search(stripped) for p in _RAW_TOOL_LINE_PATTERNS):
+            removed_tool_noise = True
+            continue
+        if stripped.startswith('{"cmd":') or stripped.startswith("{'cmd':"):
+            removed_tool_noise = True
+            continue
+
+        norm = re.sub(r"\s+", " ", stripped)
+        if norm == last_norm:
+            repeat_count += 1
+            if repeat_count >= 1:
+                continue
+        else:
+            last_norm = norm
+            repeat_count = 0
+
+        cleaned_lines.append(stripped)
+
+    while cleaned_lines and cleaned_lines[-1] == "":
+        cleaned_lines.pop()
+
+    result = "\n".join(cleaned_lines).strip()
+    if removed_tool_noise and not result:
+        return "⚠️ Внутренний служебный прогресс скрыт. Продолжаю работу."
+    return result
+
+
 def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
     append_jsonl(DRIVE_ROOT / "logs" / "chat.jsonl", {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -714,10 +767,12 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      is_progress: bool = False, send_voice: bool = False) -> None:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
+    clean_text = _sanitize_owner_facing_text(str(text or ""))
+    clean_log_text = _sanitize_owner_facing_text(str(log_text if log_text is not None else text or ""))
     # Progress messages go to progress.jsonl instead of chat.jsonl
     # This keeps chat history clean for context building
     if is_progress:
-        log_payload = text if log_text is None else log_text
+        log_payload = clean_log_text
         try:
             dedup_window_sec = max(
                 0,
@@ -752,9 +807,9 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         if not should_deliver_progress_to_owner_from_env():
             return
     else:
-        log_chat("out", chat_id, owner_id, text if log_text is None else log_text)
+        log_chat("out", chat_id, owner_id, clean_log_text)
     budget = budget_line(force=force_budget)
-    _text = str(text or "")
+    _text = clean_text
     if not budget:
         if _text.strip() in ("", "\u200b"):
             return
@@ -783,8 +838,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
 
     tg = get_tg()
     # If voice response requested, try sending voice first, fallback to text
-    if send_voice and text.strip():
-        voice_ok = send_voice_message(chat_id, text)
+    if send_voice and clean_text.strip():
+        voice_ok = send_voice_message(chat_id, clean_text)
         if voice_ok:
             # Voice sent successfully, don't also send text
             return
