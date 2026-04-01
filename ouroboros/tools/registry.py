@@ -7,6 +7,8 @@ ToolRegistry collects all tools, provides schemas() and execute().
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import importlib
 import inspect
 import logging
@@ -183,13 +185,26 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         if entry is None:
-            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+            return "Unknown tool: " + name
         try:
             filtered = _filter_kwargs(entry.handler, args)
-            return entry.handler(self._ctx, **filtered)
+            result = entry.handler(self._ctx, **filtered)
+            # Handle async handlers synchronously
+            if entry.is_async and inspect.iscoroutine(result):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            result = pool.submit(lambda: asyncio.run(result)).result(timeout=entry.timeout_sec)
+                    else:
+                        result = loop.run_until_complete(result)
+                except RuntimeError:
+                    result = asyncio.run(result)
+            return result
         except TypeError as e:
-            return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+            return "TOOL_ARG_ERROR (" + name + "): " + str(e)
         except Exception as e:
+            return "TOOL_ERROR (" + name + "): " + str(e)
             return f"⚠️ TOOL_ERROR ({name}): {e}"
 
     def queue_tools_for_next_task(self, names: List[str]) -> List[str]:
