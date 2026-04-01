@@ -8,6 +8,7 @@ ToolRegistry collects all tools, provides schemas() and execute().
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import os
 import pathlib
@@ -94,6 +95,19 @@ CORE_TOOL_NAMES = {
 }
 
 
+def _filter_kwargs(fn: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter kwargs to only include parameters the handler accepts.
+    
+    Prevents TypeError when LLM passes extra arguments not in handler's signature.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return kwargs
+    params = set(sig.parameters.keys())
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 class ToolRegistry:
     """Ouroboros tool registry (SSOT).
 
@@ -170,7 +184,8 @@ class ToolRegistry:
         if entry is None:
             return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         try:
-            return entry.handler(self._ctx, **args)
+            filtered = _filter_kwargs(entry.handler, args)
+            return entry.handler(self._ctx, **filtered)
         except TypeError as e:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
