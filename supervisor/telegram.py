@@ -782,6 +782,14 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
         return
 
     tg = get_tg()
+    # If voice response requested, try sending voice first, fallback to text
+    if send_voice and text.strip():
+        voice_ok = send_voice_message(chat_id, text)
+        if voice_ok:
+            # Voice sent successfully, don't also send text
+            return
+        # Fallback to text if voice failed
+
     for idx, part in enumerate(split_telegram(full)):
         ok, err = tg.send_message(chat_id, part)
         if not ok:
