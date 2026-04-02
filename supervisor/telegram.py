@@ -1057,6 +1057,23 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     "format": "markdown",
                 },
             )
+            return ok, message_id
+        if send_voice and clean_text.strip() and not is_progress:
+            voice_ok = send_voice_message(
+                chat_id,
+                clean_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+            if not voice_ok:
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "telegram_send_voice_fallback_failed",
+                        "chat_id": chat_id,
+                        "format": "markdown",
+                    },
+                )
         return ok, message_id
 
     tg = get_tg()
