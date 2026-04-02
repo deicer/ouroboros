@@ -70,20 +70,35 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
             name="voice_to_text",
-            description="Расшифровывает голосовое сообщение (base64 или URL) с помощью Whisper",
-            parameters={
-                "prompt": "Optional: что делать с голосом",
-                "voice_base64": "base64 голосового сообщения",
-                "voice_url": "URL голосового сообщения",
-                "model": "Модель Whisper (default: tiny)",
+            schema={
+                "name": "voice_to_text",
+                "description": "Расшифровывает голосовое сообщение (base64 или URL) с помощью Whisper",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Optional: что делать с голосом"},
+                        "voice_base64": {"type": "string", "description": "base64 голосового сообщения"},
+                        "voice_url": {"type": "string", "description": "URL голосового сообщения"},
+                        "model": {"type": "string", "description": "Модель Whisper (default: tiny)"},
+                    },
+                },
             },
-            async_function=lambda ctx, **kwargs: _voice_to_text_handler(ctx, **kwargs),
+            handler=lambda ctx, **kwargs: _voice_to_text_handler(ctx, **kwargs),
+            is_async=True,
         ),
         ToolEntry(
             name="telegram_voice_handler",
-            description="Обрабатывает голосовое сообщение из Telegram",
-            parameters={"voice_message": "Объект голосового сообщения из Telegram"},
-            async_function=_telegram_voice_handler,
+            schema={
+                "name": "telegram_voice_handler",
+                "description": "Обрабатывает голосовое сообщение из Telegram",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "voice_message": {"type": "object", "description": "Объект голосового сообщения из Telegram"},
+                    },
+                },
+            },
+            handler=_telegram_voice_handler,
         ),
     ]
 
