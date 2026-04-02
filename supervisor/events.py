@@ -726,7 +726,6 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
 # ---------------------------------------------------------------------------
 # Dispatch table
 # ---------------------------------------------------------------------------
-EVENT_
 def _handle_send_voice(evt: Dict[str, Any], ctx: Any) -> None:
     """Send voice message (OGG Opus) with optional text fallback."""
     try:
@@ -757,7 +756,7 @@ def _handle_send_voice(evt: Dict[str, Any], ctx: Any) -> None:
         except Exception:
             pass
 
-HANDLERS = {
+EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
