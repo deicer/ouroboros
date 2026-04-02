@@ -56,6 +56,43 @@ SUPERVISOR_MODULES = [
 ]
 
 
+def test_voice_module_imports_without_optional_deps(monkeypatch):
+    """voice module should import even when optional voice deps are missing."""
+    import builtins
+    import importlib
+    import sys
+
+    target_module = "ouroboros.tools.voice.voice"
+    for name in [
+        target_module,
+        "pydub",
+        "pydub.silence",
+        "whisper",
+        "telethon",
+        "telethon.tl",
+        "telethon.tl.types",
+    ]:
+        sys.modules.pop(name, None)
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "pydub" or name.startswith("pydub."):
+            raise ModuleNotFoundError("No module named 'pydub'")
+        if name == "whisper" or name.startswith("whisper."):
+            raise ModuleNotFoundError("No module named 'whisper'")
+        if name == "telethon" or name.startswith("telethon."):
+            raise ModuleNotFoundError("No module named 'telethon'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    mod = importlib.import_module(target_module)
+    assert hasattr(mod, "get_tools")
+    tools = mod.get_tools()
+    assert tools, "voice module should still expose tools"
+
+
 @pytest.mark.parametrize("module", CORE_MODULES + TOOL_MODULES + SUPERVISOR_MODULES)
 def test_import(module):
     """Every module imports without error."""

@@ -1,33 +1,45 @@
+from __future__ import annotations
+
 import base64
+import importlib
 import io
 import logging
-from typing import Optional, List
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
-import whisper
-import telethon
-from telethon.tl.types import Message, DocumentAttributeAudio
-from ouroboros.tools.registry import ToolEntry, ToolContext
+from typing import Any, List, Optional
+
+from ouroboros.tools.registry import ToolContext, ToolEntry
 
 logger = logging.getLogger(__name__)
+
+
+def _load_optional_module(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(f"{module_name} is not installed") from exc
+
+
+def _load_pydub_audio_segment():
+    return _load_optional_module("pydub").AudioSegment
+
+
+def _load_whisper():
+    return _load_optional_module("whisper")
 
 
 def _voice_to_text(ctx: ToolContext, voice_message: bytes, model: str = "tiny") -> str:
     """Расшифровывает голосовое сообщение с помощью Whisper"""
     try:
-        # Загрузить модель Whisper
+        audio_segment = _load_pydub_audio_segment()
+        whisper = _load_whisper()
+
         if not hasattr(_voice_to_text, "model_instance"):
             _voice_to_text.model_instance = whisper.load_model(model)
 
-        # Конвертировать голос в формат, совместимый с Whisper
-        audio = AudioSegment.from_file(io.BytesIO(voice_message))
-
-        # Whisper работает с файлами формата wav
+        audio = audio_segment.from_file(io.BytesIO(voice_message))
         wav_io = io.BytesIO()
         audio.export(wav_io, format="wav")
         wav_io.seek(0)
 
-        # Распознать речь
         result = _voice_to_text.model_instance.transcribe(wav_io, language="ru")
         return result["text"]
 
@@ -36,20 +48,16 @@ def _voice_to_text(ctx: ToolContext, voice_message: bytes, model: str = "tiny") 
         return f"Не удалось распознать голосовое сообщение: {str(e)}"
 
 
-def _telegram_voice_handler(ctx: ToolContext, voice_message: Message) -> str:
+def _telegram_voice_handler(ctx: ToolContext, voice_message: Any) -> str:
     """Обрабатывает голосовое сообщение из Telegram"""
     try:
-        # Получить голосовое сообщение
         if voice_message.voice:
-            # Голосовое сообщение
             voice_bytes = ctx.telegram_client.download_file(voice_message.voice)
         elif voice_message.audio:
-            # Аудиофайл
             voice_bytes = ctx.telegram_client.download_file(voice_message.audio)
         else:
             return "Это не голосовое сообщение"
 
-        # Расшифровать голос
         return _voice_to_text(ctx, voice_bytes)
 
     except Exception as e:
@@ -83,7 +91,6 @@ def get_tools() -> List[ToolEntry]:
 async def _voice_to_text_handler(ctx: ToolContext, **kwargs) -> str:
     """Обработчик голосового текста"""
     try:
-        # Получить голосовое сообщение
         voice_bytes = None
         model = kwargs.get("model", "tiny")
 
@@ -98,7 +105,6 @@ async def _voice_to_text_handler(ctx: ToolContext, **kwargs) -> str:
         if not voice_bytes:
             return "Не удалось загрузить голосовое сообщение"
 
-        # Расшифровать
         return _voice_to_text(ctx, voice_bytes, model)
 
     except Exception as e:
