@@ -23,6 +23,256 @@ from ouroboros.bootstrap_env import should_notify_scheduled_tasks_to_owner_from_
 
 log = logging.getLogger(__name__)
 
+_STATUS_MESSAGES: Dict[str, Dict[str, Any]] = {}
+_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+_STATUS_DEBOUNCE_S = 1.0
+_STATUS_TYPING_REFRESH_S = 4.0
+
+
+def _status_key(task_id: str) -> str:
+    return str(task_id or "").strip()
+
+
+def _status_store_path(ctx: Any):
+    return ctx.DRIVE_ROOT / "state" / "status_messages.json"
+
+
+def _save_status_messages(ctx: Any) -> None:
+    try:
+        path = _status_store_path(ctx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_STATUS_MESSAGES, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        log.debug("Failed to persist status messages", exc_info=True)
+
+
+def _load_status_messages(ctx: Any) -> None:
+    global _STATUS_MESSAGES
+    if _STATUS_MESSAGES:
+        return
+    path = _status_store_path(ctx)
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        log.debug("Failed to load persisted status messages", exc_info=True)
+        return
+    if not isinstance(payload, dict):
+        return
+    restored: Dict[str, Dict[str, Any]] = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            restored[key] = dict(value)
+    _STATUS_MESSAGES = restored
+
+
+def _status_render(body: str, tick: int = 0, event_count: int = 0) -> str:
+    clean = " ".join(str(body or "").split()).strip() or "thinking..."
+    spinner = _SPINNER_FRAMES[int(tick) % len(_SPINNER_FRAMES)]
+    suffix = f" ({int(event_count)})" if event_count > 0 else ""
+    return f"{spinner} {clean}{suffix}"
+
+
+def _get_status_entry(task_id: str) -> Optional[Dict[str, Any]]:
+    key = _status_key(task_id)
+    if not key:
+        return None
+    entry = _STATUS_MESSAGES.get(key)
+    return entry if isinstance(entry, dict) else None
+
+
+def _delete_status_message(task_id: str, ctx: Any) -> bool:
+    _load_status_messages(ctx)
+    key = _status_key(task_id)
+    if not key:
+        return False
+    entry = _STATUS_MESSAGES.get(key)
+    if not isinstance(entry, dict):
+        return True
+    chat_id = int(entry.get("chat_id") or 0)
+    message_id = int(entry.get("message_id") or 0)
+    if not chat_id or not message_id:
+        _STATUS_MESSAGES.pop(key, None)
+        _save_status_messages(ctx)
+        return True
+    try:
+        delete_fn = getattr(ctx.TG, "delete_message_once", None) or ctx.TG.delete_message
+        ok, err = delete_fn(chat_id, message_id)
+        if not ok:
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "status_delete_error",
+                    "task_id": key,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "error": err,
+                },
+            )
+            return False
+    except Exception as e:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "status_delete_exception",
+                "task_id": key,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "error": repr(e),
+            },
+        )
+        return False
+    _STATUS_MESSAGES.pop(key, None)
+    _save_status_messages(ctx)
+    return True
+
+
+def _handle_status_start(evt: Dict[str, Any], ctx: Any) -> None:
+    _load_status_messages(ctx)
+    task_id = _status_key(evt.get("task_id") or "")
+    chat_id = int(evt.get("chat_id") or 0)
+    reply_to_message_id = int(evt.get("reply_to_message_id") or 0)
+    if not task_id or not chat_id or not reply_to_message_id:
+        return
+    _delete_status_message(task_id, ctx)
+    body = str(evt.get("text") or evt.get("body") or "thinking...").strip()
+    render = _status_render(body, tick=0, event_count=0)
+    send_reply = getattr(ctx.TG, "send_message_reply_once", None) or ctx.TG.send_message_reply
+    ok, err, message_id = send_reply(
+        chat_id,
+        render,
+        reply_to_message_id,
+    )
+    if not ok or not message_id:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "status_start_error",
+                "task_id": task_id,
+                "chat_id": chat_id,
+                "reply_to_message_id": reply_to_message_id,
+                "error": err,
+            },
+        )
+        return
+    _STATUS_MESSAGES[task_id] = {
+        "chat_id": chat_id,
+        "reply_to_message_id": reply_to_message_id,
+        "message_id": int(message_id),
+        "last_body": body,
+        "last_rendered": render,
+        "last_edit_at": time.time(),
+        "tick": 0,
+        "event_count": 0,
+        "last_typing_at": time.time(),
+    }
+    _save_status_messages(ctx)
+
+
+def _handle_status_update(evt: Dict[str, Any], ctx: Any) -> None:
+    _load_status_messages(ctx)
+    task_id = _status_key(evt.get("task_id") or "")
+    entry = _get_status_entry(task_id)
+    if entry is None:
+        return
+    body = str(evt.get("text") or evt.get("body") or "").strip()
+    if not body:
+        return
+    entry["last_body"] = body
+    entry["event_count"] = int(entry.get("event_count") or 0) + 1
+    now_ts = time.time()
+    last_edit = float(entry.get("last_edit_at") or 0.0)
+    if (now_ts - last_edit) < _STATUS_DEBOUNCE_S:
+        entry["pending_render"] = True
+        _STATUS_MESSAGES[task_id] = entry
+        return
+    tick = int(entry.get("tick") or 0)
+    render = _status_render(body, tick=tick, event_count=int(entry.get("event_count") or 0))
+    if render == str(entry.get("last_rendered") or ""):
+        return
+    edit_fn = getattr(ctx.TG, "edit_message_text_once", None) or ctx.TG.edit_message_text
+    ok, err = edit_fn(
+        int(entry["chat_id"]),
+        int(entry["message_id"]),
+        render,
+    )
+    if ok:
+        entry["last_rendered"] = render
+        entry["last_edit_at"] = now_ts
+        entry["pending_render"] = False
+    else:
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "type": "status_update_error",
+                "task_id": task_id,
+                "chat_id": int(entry["chat_id"]),
+                "message_id": int(entry["message_id"]),
+                "error": err,
+            },
+        )
+    _STATUS_MESSAGES[task_id] = entry
+    _save_status_messages(ctx)
+
+
+def _handle_status_done(evt: Dict[str, Any], ctx: Any) -> None:
+    _delete_status_message(str(evt.get("task_id") or ""), ctx)
+
+
+def tick_status_animations(ctx: Any) -> None:
+    _load_status_messages(ctx)
+    now_ts = time.time()
+    for task_id in list(_STATUS_MESSAGES.keys()):
+        entry = _get_status_entry(task_id)
+        if entry is None:
+            continue
+        body = str(entry.get("last_body") or "").strip()
+        if not body:
+            continue
+        pending = bool(entry.get("pending_render"))
+        tick = int(entry.get("tick") or 0) + 1
+        entry["tick"] = tick
+        should_edit = pending or (now_ts - float(entry.get("last_edit_at") or 0.0)) >= _STATUS_DEBOUNCE_S
+        if should_edit:
+            render = _status_render(body, tick=tick, event_count=int(entry.get("event_count") or 0))
+            if render != str(entry.get("last_rendered") or ""):
+                edit_fn = getattr(ctx.TG, "edit_message_text_once", None) or ctx.TG.edit_message_text
+                ok, err = edit_fn(
+                    int(entry["chat_id"]),
+                    int(entry["message_id"]),
+                    render,
+                )
+                if ok:
+                    entry["last_rendered"] = render
+                    entry["last_edit_at"] = now_ts
+                    entry["pending_render"] = False
+                else:
+                    ctx.append_jsonl(
+                        ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                        {
+                            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                            "type": "status_tick_error",
+                            "task_id": task_id,
+                            "chat_id": int(entry["chat_id"]),
+                            "message_id": int(entry["message_id"]),
+                            "error": err,
+                        },
+                    )
+        last_typing_at = float(entry.get("last_typing_at") or 0.0)
+        if (now_ts - last_typing_at) >= _STATUS_TYPING_REFRESH_S:
+            try:
+                ctx.TG.send_chat_action(int(entry["chat_id"]), "typing")
+                entry["last_typing_at"] = now_ts
+            except Exception:
+                log.debug("Failed to refresh typing during status animation", exc_info=True)
+        _STATUS_MESSAGES[task_id] = entry
+    _save_status_messages(ctx)
+
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage = evt.get("usage") or {}
@@ -78,16 +328,24 @@ def _handle_typing_start(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
+        _load_status_messages(ctx)
         log_text = evt.get("log_text")
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
-        ctx.send_with_budget(
+        reply_to_message_id = evt.get("reply_to_message_id")
+        if is_progress and evt.get("task_id") and _get_status_entry(str(evt.get("task_id") or "")):
+            _handle_status_update(evt, ctx)
+            return
+        sent_ok, _message_id = ctx.send_with_budget(
             int(evt["chat_id"]),
             str(evt.get("text") or ""),
             log_text=(str(log_text) if isinstance(log_text, str) else None),
             fmt=fmt,
             is_progress=is_progress,
+            reply_to_message_id=int(reply_to_message_id) if reply_to_message_id else None,
         )
+        if sent_ok and evt.get("task_id"):
+            _delete_status_message(str(evt.get("task_id") or ""), ctx)
     except Exception as e:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -390,6 +648,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             )
         _append_evolution_attempt_result(evt, ctx, success=evolution_success)
 
+    if task_id:
+        _delete_status_message(str(task_id), ctx)
     if task_id:
         ctx.RUNNING.pop(str(task_id), None)
     if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
@@ -731,19 +991,22 @@ def _handle_send_voice(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         ogg_bytes = evt.get('ogg_bytes') or evt.get('voice_bytes')
         if ogg_bytes:
-            result = ctx.b.send_audio(
+            ok, err, _message_id = ctx.TG.send_voice_bytes(
                 chat_id=int(evt['chat_id']),
-                audio=('voice.ogg', io.BytesIO(ogg_bytes), 'audio/ogg'),
-                caption=str(evt.get('caption', '')) or None,
-                disable_notification=bool(evt.get('quiet', False)),
+                voice_bytes=ogg_bytes,
+                caption=str(evt.get('caption', '')) or "",
+                reply_to_message_id=int(evt.get("reply_to_message_id") or 0) or None,
             )
-            ctx._last_message_id = result.message_id
+            if not ok:
+                raise RuntimeError(err)
         else:
             ctx.send_with_budget(
                 int(evt['chat_id']),
                 str(evt.get('text', '')),
                 fmt=str(evt.get('format') or ''),
                 is_progress=bool(evt.get('is_progress')),
+                send_voice=True,
+                reply_to_message_id=int(evt.get("reply_to_message_id") or 0) or None,
             )
     except Exception:
         try:
@@ -752,6 +1015,7 @@ def _handle_send_voice(evt: Dict[str, Any], ctx: Any) -> None:
                 str(evt.get('fallback_text', '???')),
                 fmt='md',
                 is_progress=bool(evt.get('is_progress')),
+                reply_to_message_id=int(evt.get("reply_to_message_id") or 0) or None,
             )
         except Exception:
             pass
@@ -760,6 +1024,9 @@ EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
+    "status_start": _handle_status_start,
+    "status_update": _handle_status_update,
+    "status_done": _handle_status_done,
     "send_message": _handle_send_message,
     "send_voice": _handle_send_voice,
     "task_done": _handle_task_done,

@@ -1,4 +1,5 @@
 import os
+import sys
 import types
 
 from ouroboros.llm import (
@@ -171,6 +172,24 @@ def test_llm_client_defaults_to_env_overrides(monkeypatch):
 
     assert client._base_url == "http://127.0.0.1:2455/v1"
     assert client._api_key == "sk-clb-test"
+
+
+def test_llm_client_http_referer_uses_current_repo_env(monkeypatch):
+    captured = {}
+
+    class DummyOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setenv("GITHUB_USER", "deicer")
+    monkeypatch.setenv("GITHUB_REPO", "ouroboros")
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=DummyOpenAI))
+
+    client = LLMClient(api_key="sk-test", base_url="http://127.0.0.1:2455/v1")
+    client._get_client()
+
+    assert captured["default_headers"]["HTTP-Referer"] == "https://github.com/deicer/ouroboros"
+    assert captured["default_headers"]["X-Title"] == "Ouroboros"
 
 
 def test_fetch_openrouter_pricing_sends_auth_header(monkeypatch):

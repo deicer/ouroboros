@@ -1049,6 +1049,7 @@ def _drain_incoming_messages(
     task_id: str,
     event_queue: Optional[queue.Queue],
     _owner_msg_seen: set,
+    owner_message_meta: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     Inject owner messages received during task execution.
@@ -1060,7 +1061,15 @@ def _drain_incoming_messages(
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
-            messages.append({"role": "user", "content": injected})
+            if isinstance(injected, dict):
+                injected_text = str(injected.get("text") or "")
+                injected_message_id = int(injected.get("message_id") or 0) or None
+            else:
+                injected_text = str(injected or "")
+                injected_message_id = None
+            messages.append({"role": "user", "content": injected_text})
+            if owner_message_meta is not None and injected_message_id:
+                owner_message_meta["message_id"] = injected_message_id
             injected_count += 1
         except queue.Empty:
             break
@@ -1103,6 +1112,7 @@ def run_llm_loop(
     initial_effort: str = "medium",
     drive_root: Optional[pathlib.Path] = None,
     is_direct_chat: bool = False,
+    owner_message_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -1337,7 +1347,7 @@ def run_llm_loop(
 
             # Inject owner messages (in-process queue + Drive mailbox)
             injected_owner_count = _drain_incoming_messages(
-                messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen
+                messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen, owner_message_meta
             )
             if injected_owner_count > 0 and is_direct_chat:
                 owner_interrupt_deadline_round = round_idx + owner_interrupt_grace_rounds
@@ -1532,6 +1542,17 @@ def run_llm_loop(
 
             if content and content.strip():
                 llm_trace["assistant_notes"].append(content.strip()[:320])
+
+            tool_names = [
+                str(tc.get("function", {}).get("name") or "").strip()
+                for tc in tool_calls
+                if str(tc.get("function", {}).get("name") or "").strip()
+            ]
+            if tool_names:
+                preview = ", ".join(tool_names[:3])
+                if len(tool_names) > 3:
+                    preview += f" +{len(tool_names) - 3}"
+                emit_progress(f"🛠️ Выполняю: {preview}")
 
             error_count = _handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,

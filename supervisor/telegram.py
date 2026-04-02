@@ -147,8 +147,12 @@ def _mp3_to_ogg(mp3_bytes: bytes) -> bytes:
         return b""
 
 
-def send_voice_message(chat_id: int, text: str,
-                       voice: str = TTS_VOICE) -> bool:
+def send_voice_message(
+    chat_id: int,
+    text: str,
+    voice: str = TTS_VOICE,
+    reply_to_message_id: Optional[int] = None,
+) -> bool:
     """Synthesize text to speech and send as Telegram voice message.
     Returns True on success, False on failure (fallback to text needed)."""
     if not chat_id or not text:
@@ -160,16 +164,12 @@ def send_voice_message(chat_id: int, text: str,
         ogg_bytes = _mp3_to_ogg(mp3_bytes)
         if not ogg_bytes:
             return False
-        # Send via /sendVoice
-        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        if not token:
-            return False
-        url = f"https://api.telegram.org/bot{token}/sendVoice"
-        files = {"voice": ("voice.ogg", ogg_bytes, "audio/ogg")}
-        data = {"chat_id": str(chat_id)}
-        resp = requests.post(url, data=data, files=files, timeout=30)
-        resp.raise_for_status()
-        return resp.json().get("ok", False)
+        ok, _err, _message_id = get_tg().send_voice_bytes(
+            chat_id,
+            ogg_bytes,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return ok
     except Exception as e:
         log.warning("send_voice_message failed: %s", e)
         return False
@@ -207,6 +207,65 @@ class TelegramClient:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}"
         self._token = token
+
+    def _post_with_retry(
+        self,
+        method: str,
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        timeout: int = 30,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        last_err = "unknown"
+        last_data: Dict[str, Any] = {}
+        for attempt in range(3):
+            should_retry = False
+            try:
+                r = requests.post(f"{self.base}/{method}", data=data or {}, timeout=timeout)
+                payload: Dict[str, Any] = {}
+                try:
+                    payload = r.json() if r.content else {}
+                except Exception:
+                    payload = {}
+                last_data = payload
+                status_code = int(r.status_code or 0)
+                if status_code == 200 and payload.get("ok") is True:
+                    return True, "ok", payload
+
+                last_err = f"telegram_api_error: status={status_code} data={payload}"
+                if self._is_retryable_status(status_code) and attempt < 2:
+                    should_retry = True
+                    time.sleep(self._retry_delay_sec(attempt, payload))
+                    continue
+            except Exception as e:
+                last_err = repr(e)
+                should_retry = isinstance(e, requests.RequestException)
+            if should_retry and attempt < 2:
+                time.sleep(self._retry_delay_sec(attempt))
+                continue
+            if not should_retry:
+                break
+        return False, last_err, last_data
+
+    def _post_once(
+        self,
+        method: str,
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        timeout: int = 30,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        try:
+            r = requests.post(f"{self.base}/{method}", data=data or {}, timeout=timeout)
+            payload: Dict[str, Any] = {}
+            try:
+                payload = r.json() if r.content else {}
+            except Exception:
+                payload = {}
+            status_code = int(r.status_code or 0)
+            if status_code == 200 and payload.get("ok") is True:
+                return True, "ok", payload
+            return False, f"telegram_api_error: status={status_code} data={payload}", payload
+        except Exception as e:
+            return False, repr(e), {}
 
     @staticmethod
     def _extract_retry_after(data: Any) -> float:
@@ -275,39 +334,154 @@ class TelegramClient:
         raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
 
     def send_message(self, chat_id: int, text: str, parse_mode: str = "") -> Tuple[bool, str]:
+        payload: Dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        ok, err, _ = self._post_with_retry("sendMessage", data=payload, timeout=30)
+        return ok, err
+
+    def send_message_reply(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int,
+        parse_mode: str = "",
+    ) -> Tuple[bool, str, Optional[int]]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+            "reply_to_message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        ok, err, data = self._post_with_retry("sendMessage", data=payload, timeout=30)
+        if not ok:
+            return False, err, None
+        result = data.get("result") or {}
+        message_id = result.get("message_id")
+        try:
+            return True, err, int(message_id) if message_id is not None else None
+        except (TypeError, ValueError):
+            return True, err, None
+
+    def send_message_reply_once(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to_message_id: int,
+        parse_mode: str = "",
+    ) -> Tuple[bool, str, Optional[int]]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+            "reply_to_message_id": int(reply_to_message_id),
+            "allow_sending_without_reply": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        ok, err, data = self._post_once("sendMessage", data=payload, timeout=15)
+        if not ok:
+            return False, err, None
+        result = data.get("result") or {}
+        message_id = result.get("message_id")
+        try:
+            return True, err, int(message_id) if message_id is not None else None
+        except (TypeError, ValueError):
+            return True, err, None
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode: str = "",
+    ) -> Tuple[bool, str]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        ok, err, _ = self._post_with_retry("editMessageText", data=payload, timeout=30)
+        return ok, err
+
+    def edit_message_text_once(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        parse_mode: str = "",
+    ) -> Tuple[bool, str]:
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        ok, err, _ = self._post_once("editMessageText", data=payload, timeout=10)
+        return ok, err
+
+    def delete_message(self, chat_id: int, message_id: int) -> Tuple[bool, str]:
+        ok, err, _ = self._post_with_retry(
+            "deleteMessage",
+            data={"chat_id": int(chat_id), "message_id": int(message_id)},
+            timeout=15,
+        )
+        return ok, err
+
+    def delete_message_once(self, chat_id: int, message_id: int) -> Tuple[bool, str]:
+        ok, err, _ = self._post_once(
+            "deleteMessage",
+            data={"chat_id": int(chat_id), "message_id": int(message_id)},
+            timeout=10,
+        )
+        return ok, err
+
+    def send_voice_bytes(
+        self,
+        chat_id: int,
+        voice_bytes: bytes,
+        *,
+        caption: str = "",
+        reply_to_message_id: Optional[int] = None,
+    ) -> Tuple[bool, str, Optional[int]]:
         last_err = "unknown"
         for attempt in range(3):
-            should_retry = False
             try:
-                payload: Dict[str, Any] = {"chat_id": chat_id, "text": text,
-                                           "disable_web_page_preview": True}
-                if parse_mode:
-                    payload["parse_mode"] = parse_mode
-                r = requests.post(f"{self.base}/sendMessage", data=payload, timeout=30)
-                data: Dict[str, Any] = {}
+                files = {"voice": ("voice.ogg", voice_bytes, "audio/ogg")}
+                data: Dict[str, Any] = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption[:1024]
+                if reply_to_message_id:
+                    data["reply_to_message_id"] = str(int(reply_to_message_id))
+                    data["allow_sending_without_reply"] = "true"
+                r = requests.post(f"{self.base}/sendVoice", data=data, files=files, timeout=30)
+                payload: Dict[str, Any] = {}
                 try:
-                    data = r.json() if r.content else {}
+                    payload = r.json() if r.content else {}
                 except Exception:
-                    data = {}
+                    payload = {}
                 status_code = int(r.status_code or 0)
-
-                if status_code == 200 and data.get("ok") is True:
-                    return True, "ok"
-
-                last_err = f"telegram_api_error: status={status_code} data={data}"
-                if self._is_retryable_status(status_code) and attempt < 2:
-                    should_retry = True
-                    time.sleep(self._retry_delay_sec(attempt, data))
-                    continue
+                if status_code == 200 and payload.get("ok") is True:
+                    result = payload.get("result") or {}
+                    message_id = result.get("message_id")
+                    try:
+                        return True, "ok", int(message_id) if message_id is not None else None
+                    except (TypeError, ValueError):
+                        return True, "ok", None
+                last_err = f"telegram_api_error: status={status_code} data={payload}"
             except Exception as e:
                 last_err = repr(e)
-                should_retry = isinstance(e, requests.RequestException)
-            if should_retry and attempt < 2:
-                time.sleep(self._retry_delay_sec(attempt))
-                continue
-            if not should_retry:
-                break
-        return False, last_err
+            if attempt < 2:
+                time.sleep(0.8 * (attempt + 1))
+        return False, last_err, None
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
         """Send chat action (typing indicator). Best-effort, no retries."""
@@ -582,26 +756,52 @@ def _chunk_markdown_for_telegram(md: str, max_chars: int = 3500) -> List[str]:
     return chunks or [md]
 
 
-def _send_markdown_telegram(chat_id: int, text: str) -> Tuple[bool, str]:
+def _send_markdown_telegram(
+    chat_id: int,
+    text: str,
+    *,
+    reply_to_message_id: Optional[int] = None,
+) -> Tuple[bool, str, Optional[int]]:
     """Send markdown text as Telegram HTML, with plain-text fallback."""
     tg = get_tg()
     chunks = _chunk_markdown_for_telegram(text or "", max_chars=3200)
     chunks = [c for c in chunks if isinstance(c, str) and c.strip()]
     if not chunks:
-        return False, "empty_chunks"
+        return False, "empty_chunks", None
     last_err = "ok"
+    first_message_id: Optional[int] = None
     for md_part in chunks:
         html_text = _markdown_to_telegram_html(md_part)
-        ok, err = tg.send_message(chat_id, _sanitize_telegram_text(html_text), parse_mode="HTML")
+        if reply_to_message_id:
+            ok, err, message_id = tg.send_message_reply(
+                chat_id,
+                _sanitize_telegram_text(html_text),
+                int(reply_to_message_id),
+                parse_mode="HTML",
+            )
+        else:
+            ok, err = tg.send_message(chat_id, _sanitize_telegram_text(html_text), parse_mode="HTML")
+            message_id = None
         if not ok:
             plain = _strip_markdown(md_part)
             if not plain.strip():
-                return False, err
-            ok2, err2 = tg.send_message(chat_id, _sanitize_telegram_text(plain))
+                return False, err, first_message_id
+            if reply_to_message_id:
+                ok2, err2, message_id = tg.send_message_reply(
+                    chat_id,
+                    _sanitize_telegram_text(plain),
+                    int(reply_to_message_id),
+                )
+            else:
+                ok2, err2 = tg.send_message(chat_id, _sanitize_telegram_text(plain))
+                message_id = None
             if not ok2:
-                return False, err2
+                return False, err2, first_message_id
+            err = err2
+        if first_message_id is None and message_id is not None:
+            first_message_id = message_id
         last_err = err
-    return True, last_err
+    return True, last_err, first_message_id
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +905,14 @@ _RAW_TOOL_LINE_PATTERNS = (
     re.compile(r"^\s*\{.*\"recipient_name\"\s*:\s*\"functions\.", re.IGNORECASE),
 )
 
+_RAW_TOOL_INLINE_PATTERNS = (
+    re.compile(r"\s+to=functions\.[\w_]+.*$", re.IGNORECASE),
+    re.compile(r"\s+to=multi_tool_use\.[\w_]+.*$", re.IGNORECASE),
+    re.compile(r"\s+\{\"tool_uses\"\s*:.*$", re.IGNORECASE),
+    re.compile(r"\s+\{\"recipient_name\"\s*:\s*\"functions\..*$", re.IGNORECASE),
+    re.compile(r"\s+\{\"cmd\"\s*:\s*\[.*$", re.IGNORECASE),
+)
+
 
 def _sanitize_owner_facing_text(text: str) -> str:
     """Strip raw tool-call leakage and collapse noisy repeated lines."""
@@ -729,6 +937,16 @@ def _sanitize_owner_facing_text(text: str) -> str:
             continue
         if stripped.startswith('{"cmd":') or stripped.startswith("{'cmd':"):
             removed_tool_noise = True
+            continue
+
+        line_without_noise = line
+        for pattern in _RAW_TOOL_INLINE_PATTERNS:
+            updated = pattern.sub("", line_without_noise)
+            if updated != line_without_noise:
+                removed_tool_noise = True
+                line_without_noise = updated
+        stripped = line_without_noise.strip()
+        if not stripped:
             continue
 
         norm = re.sub(r"\s+", " ", stripped)
@@ -764,7 +982,8 @@ def log_chat(direction: str, chat_id: int, user_id: int, text: str) -> None:
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      force_budget: bool = False, fmt: str = "",
-                     is_progress: bool = False, send_voice: bool = False) -> None:
+                     is_progress: bool = False, send_voice: bool = False,
+                     reply_to_message_id: Optional[int] = None) -> Tuple[bool, Optional[int]]:
     st = load_state()
     owner_id = int(st.get("owner_id") or 0)
     clean_text = _sanitize_owner_facing_text(str(text or ""))
@@ -798,21 +1017,21 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     "window_sec": int(dedup_window_sec),
                     "text_preview": str(log_payload)[:160],
                 })
-            return
+            return False, None
         append_jsonl(DRIVE_ROOT / "logs" / "progress.jsonl", {
             "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "direction": "out", "chat_id": chat_id, "user_id": owner_id,
             "text": log_payload,
         })
         if not should_deliver_progress_to_owner_from_env():
-            return
+            return False, None
     else:
         log_chat("out", chat_id, owner_id, clean_log_text)
     budget = budget_line(force=force_budget)
     _text = clean_text
     if not budget:
         if _text.strip() in ("", "\u200b"):
-            return
+            return False, None
         full = _text
     else:
         base = _text.rstrip()
@@ -822,7 +1041,11 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             full = base + "\n\n" + budget
 
     if fmt == "markdown":
-        ok, err = _send_markdown_telegram(chat_id, full)
+        ok, err, message_id = _send_markdown_telegram(
+            chat_id,
+            full,
+            reply_to_message_id=reply_to_message_id,
+        )
         if not ok:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -834,19 +1057,27 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     "format": "markdown",
                 },
             )
-        return
+        return ok, message_id
 
     tg = get_tg()
     # If voice response requested, try sending voice first, fallback to text
     if send_voice and clean_text.strip():
-        voice_ok = send_voice_message(chat_id, clean_text)
+        voice_ok = send_voice_message(chat_id, clean_text, reply_to_message_id=reply_to_message_id)
         if voice_ok:
             # Voice sent successfully, don't also send text
-            return
+            return True, None
         # Fallback to text if voice failed
 
+    first_message_id: Optional[int] = None
+    sent_any = False
     for idx, part in enumerate(split_telegram(full)):
-        ok, err = tg.send_message(chat_id, part)
+        if reply_to_message_id:
+            ok, err, message_id = tg.send_message_reply(chat_id, part, int(reply_to_message_id))
+        else:
+            ok, err = tg.send_message(chat_id, part)
+            message_id = None
+        if first_message_id is None and message_id is not None:
+            first_message_id = message_id
         if not ok:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -859,3 +1090,5 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                 },
             )
             break
+        sent_any = True
+    return sent_any, first_message_id

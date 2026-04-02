@@ -77,3 +77,21 @@ def test_sanitize_owner_facing_text_collapses_duplicate_lines():
 
     assert cleaned.count("Смотрю конец send_with_budget") == 1
     assert "Потом внесу правку." in cleaned
+
+
+def test_sanitize_owner_facing_text_strips_inline_multi_tool_noise():
+    raw = (
+        "Смотрю, где уже есть готовый переключатель send_voice=True. "
+        "to=multi_tool_use.parallel "
+        "{\"tool_uses\":[{\"recipient_name\":\"functions.run_shell\","
+        "\"parameters\":{\"cmd\":[\"bash\",\"-lc\",\"python ...\"]}}]}\n"
+        "Если он уже прокинут в точку доставки — добиваю там.\n"
+    )
+
+    cleaned = _sanitize_owner_facing_text(raw)
+
+    assert "to=multi_tool_use.parallel" not in cleaned
+    assert "\"tool_uses\"" not in cleaned
+    assert "\"recipient_name\"" not in cleaned
+    assert "Смотрю, где уже есть готовый переключатель send_voice=True." in cleaned
+    assert "Если он уже прокинут в точку доставки — добиваю там." in cleaned

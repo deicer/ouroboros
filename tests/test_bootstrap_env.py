@@ -71,6 +71,14 @@ def test_launcher_has_background_autostart_guard():
     assert 'os.environ.get("OUROBOROS_BG_ENABLED"' not in launcher_src
 
 
+def test_status_command_no_longer_falls_through_to_llm():
+    launcher_src = Path("/home/deicer/ouroboros/launcher.py").read_text(encoding="utf-8")
+    assert 'return "[Supervisor handled /status' not in launcher_src
+    assert 'if lowered.startswith("/status"):' in launcher_src
+    assert "send_with_budget(chat_id, status, force_budget=True)" in launcher_src
+    assert "return True" in launcher_src
+
+
 def test_env_example_documents_openrouter_free_mode():
     env_example = Path("/home/deicer/ouroboros/.env.example").read_text(encoding="utf-8")
     assert "OUROBOROS_MODEL=openrouter/free" in env_example

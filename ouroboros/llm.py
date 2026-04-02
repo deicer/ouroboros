@@ -54,6 +54,14 @@ def _is_local_base_url(base_url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
 
 
+def _default_http_referer() -> str:
+    github_user = str(os.environ.get("GITHUB_USER", "") or "").strip()
+    github_repo = str(os.environ.get("GITHUB_REPO", "") or "").strip()
+    if github_user and github_repo:
+        return f"https://github.com/{github_user}/{github_repo}"
+    return "https://github.com/jkee/ouroboros"
+
+
 def get_llm_api_key() -> str:
     explicit = str(os.environ.get("OUROBOROS_LLM_API_KEY", "") or "").strip()
     if explicit:
@@ -688,7 +696,7 @@ class LLMClient:
                 base_url=self._base_url,
                 api_key=self._api_key,
                 default_headers={
-                    "HTTP-Referer": "https://github.com/jkee/ouroboros",
+                    "HTTP-Referer": _default_http_referer(),
                     "X-Title": "Ouroboros",
                 },
             )

@@ -132,7 +132,12 @@ def _get_chat_agent():
     return _chat_agent
 
 
-def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
+def handle_chat_direct(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    message_id: Optional[int] = None,
+) -> None:
     try:
         agent = _get_chat_agent()
         while True:
@@ -143,6 +148,8 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
                 "text": text,
                 "_is_direct_chat": True,
             }
+            if message_id:
+                task["message_id"] = int(message_id)
             if image_data:
                 # image_data is (base64, mime) or (base64, mime, caption)
                 task["image_base64"] = image_data[0]
@@ -160,15 +167,26 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
                 get_event_q().put(e)
 
             leftover: List[str] = []
+            next_message_id: Optional[int] = None
             while not agent._incoming_messages.empty():
                 try:
-                    leftover.append(agent._incoming_messages.get_nowait())
+                    pending = agent._incoming_messages.get_nowait()
+                    if isinstance(pending, dict):
+                        pending_text = str(pending.get("text") or "")
+                        pending_message_id = int(pending.get("message_id") or 0) or None
+                    else:
+                        pending_text = str(pending or "")
+                        pending_message_id = None
+                    leftover.append(pending_text)
+                    if pending_message_id:
+                        next_message_id = pending_message_id
                 except _queue_mod.Empty:
                     break
             if not leftover:
                 break
             text = "\n\n".join(leftover)
             image_data = None
+            message_id = next_message_id
     except Exception as e:
         import traceback
         err_msg = f"⚠️ Error: {type(e).__name__}: {e}"

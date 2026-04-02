@@ -260,3 +260,31 @@ def test_rewrite_user_reply_uses_prompt_cache_key(monkeypatch, tmp_path):
     assert out == "Переписанный ответ."
     assert captured["prompt_cache_key"] == expected_key
     assert captured["session_id"] == expected_key
+def test_emit_progress_keeps_non_direct_progress_visible(monkeypatch, tmp_path):
+    repo_dir = tmp_path / "repo"
+    drive_root = tmp_path / "drive"
+    repo_dir.mkdir()
+    (drive_root / "logs").mkdir(parents=True)
+    (drive_root / "memory").mkdir(parents=True)
+    (drive_root / "memory" / "identity.md").write_text("# id", encoding="utf-8")
+    (drive_root / "memory" / "scratchpad.md").write_text("", encoding="utf-8")
+
+    class _Q:
+        def __init__(self):
+            self.items = []
+
+        def put(self, item):
+            self.items.append(item)
+
+    monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    q = _Q()
+    agent = OuroborosAgent(env=Env(repo_dir=repo_dir, drive_root=drive_root), event_queue=q)
+    agent._current_chat_id = 1
+    agent._current_task_id = "task-1"
+    agent._current_original_message_id = None
+
+    agent._emit_progress("background progress")
+
+    assert q.items
+    assert q.items[-1]["type"] == "send_message"
+    assert q.items[-1]["is_progress"] is True

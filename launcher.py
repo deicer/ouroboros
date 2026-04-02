@@ -224,7 +224,7 @@ workers_init(
     branch_dev=BRANCH_DEV, branch_stable=BRANCH_STABLE,
 )
 
-from supervisor.events import dispatch_event
+from supervisor.events import dispatch_event, tick_status_animations
 
 # ----------------------------
 # 5) Bootstrap repo
@@ -245,39 +245,20 @@ else:
 _init_st = load_state()
 if not _init_st.get("initialized"):
     log.info("First-run initialization (Bible section 18)")
-    # Create ARCHITECTURE.md if missing
-    _arch_path = REPO_DIR / "ARCHITECTURE.md"
-    if not _arch_path.exists():
-        _arch_path.write_text(
-            "# Архитектура Ouroboros\n\n"
-            "Техническая архитектура системы. Документ поддерживается агентом.\n\n"
-            "## 12. Журнал архитектурных изменений (авто, append-only)\n\n"
-            "Ниже агент автоматически дописывает записи после автономных code-change задач.\n",
-            encoding="utf-8",
-        )
-    # Create IMPROVE.md if missing
-    _improve_path = REPO_DIR / "IMPROVE.md"
-    if not _improve_path.exists():
-        _improve_path.write_text(
-            "# How to Improve Effectively\n\n"
-            "This file captures lessons on self-improvement.\n"
-            "Maintained by the agent. See BIBLE.md section 8.\n",
-            encoding="utf-8",
-        )
-    # Create improvements-log/ directory
+    # The repo already tracks ARCHITECTURE.md and IMPROVE.md; only ensure runtime dirs exist.
     _implog_dir = REPO_DIR / "improvements-log"
     _implog_dir.mkdir(parents=True, exist_ok=True)
     (_implog_dir / ".gitkeep").touch(exist_ok=True)
     # Commit and push init files so workers don't see untracked files
     try:
         import subprocess as _sp
-        _sp.run(["git", "add", "ARCHITECTURE.md", "IMPROVE.md", "improvements-log/"],
+        _sp.run(["git", "add", "improvements-log/"],
                 cwd=str(REPO_DIR), timeout=10, check=True)
         # Only commit if there are staged changes
         _diff = _sp.run(["git", "diff", "--cached", "--quiet"],
                         cwd=str(REPO_DIR), timeout=10)
         if _diff.returncode != 0:
-            _sp.run(["git", "commit", "-m", "init: add ARCHITECTURE.md, IMPROVE.md, improvements-log"],
+            _sp.run(["git", "commit", "-m", "init: add improvements-log"],
                     cwd=str(REPO_DIR), timeout=30, check=True)
             _sp.run(["git", "push", "origin", BRANCH_DEV],
                     cwd=str(REPO_DIR), timeout=60, check=True)
@@ -505,7 +486,7 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
     if lowered.startswith("/status"):
         status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
         send_with_budget(chat_id, status, force_budget=True)
-        return "[Supervisor handled /status \u2014 status text already sent to chat]\n"
+        return True
 
     if lowered.startswith("/review"):
         queue_review_task(reason="owner:/review", force=True)
@@ -672,6 +653,7 @@ while True:
         except _queue_mod.Empty:
             break
         dispatch_event(evt, _event_ctx)
+    tick_status_animations(_event_ctx)
 
     enforce_task_timeouts()
     enqueue_evolution_task_if_needed()
@@ -702,6 +684,7 @@ while True:
             continue
 
         chat_id = int(msg["chat"]["id"])
+        user_message_id = int(msg.get("message_id") or 0) or None
         from_user = msg.get("from") or {}
         user_id = int(from_user.get("id") or 0)
         text = str(msg.get("text") or "")
@@ -793,10 +776,10 @@ while True:
             # BUSY PATH: inject into active conversation (single consumer)
             if image_data:
                 if text:
-                    agent.inject_message(text)
+                    agent.inject_message(text, user_message_id)
                 send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
             elif text:
-                agent.inject_message(text)
+                agent.inject_message(text, user_message_id)
                 _maybe_send_busy_ack(chat_id)
 
         else:
@@ -827,6 +810,7 @@ while True:
                     _uid2 = (_msg2.get("from") or {}).get("id")
                     _cid2 = (_msg2.get("chat") or {}).get("id")
                     _txt2 = _msg2.get("text") or _msg2.get("caption") or ""
+                    _msg2_id = int(_msg2.get("message_id") or 0) or None
                     if _uid2 and _batch_state.get("owner_id") and _uid2 == int(_batch_state["owner_id"]):
                         log_chat("in", _cid2, _uid2, _txt2)
                         _batch_state["last_owner_message_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -845,6 +829,8 @@ while True:
                                 log.warning("Supervisor command in batch failed", exc_info=True)
                         if _txt2:
                             _batched_texts.append(_txt2)
+                            if _msg2_id:
+                                user_message_id = _msg2_id
                             _batch_deadline = max(_batch_deadline, time.time() + 0.3)  # extend for burst
                         if not _batched_image:
                             _doc2 = _msg2.get("document") or {}
@@ -871,21 +857,21 @@ while True:
             # Re-check if agent became busy during batch window (race condition fix)
             if agent._busy:
                 if final_text:
-                    agent.inject_message(final_text)
+                    agent.inject_message(final_text, user_message_id)
                     _maybe_send_busy_ack(chat_id)
                 if _batched_image:
                     send_with_budget(chat_id, "\U0001f4ce Photo received, but a task is in progress. Send again when I'm free.")
             else:
                 # Dispatch to direct chat handler
                 _consciousness.pause()
-                def _run_task_and_resume(cid, txt, img):
+                def _run_task_and_resume(cid, txt, img, msg_id):
                     try:
-                        handle_chat_direct(cid, txt, img)
+                        handle_chat_direct(cid, txt, img, msg_id)
                     finally:
                         _consciousness.resume()
                 _t = threading.Thread(
                     target=_run_task_and_resume,
-                    args=(chat_id, final_text, _batched_image),
+                    args=(chat_id, final_text, _batched_image, user_message_id),
                     daemon=True,
                 )
                 try:

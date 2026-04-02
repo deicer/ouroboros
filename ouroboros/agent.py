@@ -262,6 +262,8 @@ class OuroborosAgent:
         self._event_queue: Any = event_queue
         self._current_chat_id: Optional[int] = None
         self._current_task_type: Optional[str] = None
+        self._current_task_id: Optional[str] = None
+        self._current_original_message_id: Optional[int] = None
 
         # Message injection: owner can send messages while agent is busy
         self._incoming_messages: queue.Queue = queue.Queue()
@@ -276,9 +278,9 @@ class OuroborosAgent:
 
         self._log_worker_boot_once()
 
-    def inject_message(self, text: str) -> None:
+    def inject_message(self, text: str, message_id: Optional[int] = None) -> None:
         """Thread-safe: inject owner message into the active conversation."""
-        self._incoming_messages.put(text)
+        self._incoming_messages.put({"text": text, "message_id": int(message_id) if message_id else None})
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged
@@ -524,6 +526,8 @@ class OuroborosAgent:
         )
         self.tools.set_context(ctx)
 
+        if bool(task.get("_is_direct_chat")) and self._current_original_message_id:
+            self._emit_status_start("thinking...")
         # Typing indicator via event queue (no direct Telegram API)
         self._emit_typing_start()
 
@@ -555,6 +559,8 @@ class OuroborosAgent:
         self._pending_events = []
         self._current_chat_id = int(task.get("chat_id") or 0) or None
         self._current_task_type = str(task.get("type") or "")
+        self._current_task_id = str(task.get("id") or "") or None
+        self._current_original_message_id = int(task.get("message_id") or 0) or None
 
         drive_logs = self.env.drive_path("logs")
         heartbeat_stop = self._start_task_heartbeat_loop(str(task.get("id") or ""))
@@ -574,6 +580,7 @@ class OuroborosAgent:
             else:
                 initial_effort = "medium"
 
+            owner_message_meta = {"message_id": self._current_original_message_id}
             try:
                 text, usage, llm_trace = run_llm_loop(
                     messages=messages,
@@ -588,6 +595,7 @@ class OuroborosAgent:
                     initial_effort=initial_effort,
                     drive_root=self.env.drive_root,
                     is_direct_chat=bool(task.get("_is_direct_chat")),
+                    owner_message_meta=owner_message_meta,
                 )
             except Exception as e:
                 tb = traceback.format_exc()
@@ -605,6 +613,9 @@ class OuroborosAgent:
             # Refresh durable file map after tool activity so new files are discoverable
             # across cycles/restarts without path guessing.
             try:
+                latest_reply_target = int(owner_message_meta.get("message_id") or 0) or None
+                if latest_reply_target:
+                    self._current_original_message_id = latest_reply_target
                 if llm_trace.get("tool_calls"):
                     self.memory.refresh_path_catalog(
                         reason=f"task_done:{task.get('id')}",
@@ -628,6 +639,8 @@ class OuroborosAgent:
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None
+            self._current_task_id = None
+            self._current_original_message_id = None
     # =====================================================================
     # Task result emission
     # =====================================================================
@@ -820,12 +833,14 @@ class OuroborosAgent:
                 "type": "send_message", "chat_id": task["chat_id"],
                 "text": user_text or "\u200b", "log_text": log_text or "",
                 "format": "markdown",
+                "reply_to_message_id": self._current_original_message_id,
                 "task_id": task.get("id"), "ts": utc_now_iso(),
             })
             # TTS: send voice reply in parallel with text
             self._pending_events.append({
                 "type": "send_voice", "chat_id": task["chat_id"],
                 "text": user_text or "\u200b",
+                "reply_to_message_id": self._current_original_message_id,
                 "task_id": task.get("id"), "ts": utc_now_iso(),
             })
 
@@ -944,14 +959,47 @@ class OuroborosAgent:
         if self._event_queue is None or self._current_chat_id is None:
             return
         try:
-            self._event_queue.put({
-                "type": "send_message", "chat_id": self._current_chat_id,
-                "text": f"💬 {text}", "format": "markdown", "is_progress": True,
-                "ts": utc_now_iso(),
-            })
+            if self._current_task_id and self._current_original_message_id:
+                self._event_queue.put({
+                    "type": "status_update",
+                    "chat_id": self._current_chat_id,
+                    "task_id": self._current_task_id,
+                    "text": str(text or ""),
+                    "ts": utc_now_iso(),
+                })
+            else:
+                self._event_queue.put({
+                    "type": "send_message",
+                    "chat_id": self._current_chat_id,
+                    "text": f"💬 {text}",
+                    "format": "markdown",
+                    "is_progress": True,
+                    "task_id": self._current_task_id,
+                    "ts": utc_now_iso(),
+                })
         except Exception:
             log.warning("Failed to emit progress event", exc_info=True)
             pass
+
+    def _emit_status_start(self, text: str) -> None:
+        if (
+            self._event_queue is None
+            or self._current_chat_id is None
+            or not self._current_task_id
+            or not self._current_original_message_id
+        ):
+            return
+        try:
+            self._event_queue.put({
+                "type": "status_start",
+                "chat_id": self._current_chat_id,
+                "task_id": self._current_task_id,
+                "reply_to_message_id": self._current_original_message_id,
+                "text": str(text or ""),
+                "ts": utc_now_iso(),
+            })
+        except Exception:
+            log.warning("Failed to emit status start event", exc_info=True)
 
     def _emit_typing_start(self) -> None:
         if self._event_queue is None or self._current_chat_id is None:
